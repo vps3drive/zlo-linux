@@ -18,7 +18,9 @@ native/
 │   └── zwalker/              # Dọn rác bộ nhớ đệm thư mục media (Rust)
 └── engines/                  # Các hệ thống con độc lập
     ├── zcall/                # Engine gọi điện thoại (báo hiệu, ZRTP/SRTP & Rust audio)
-    └── zocr/                 # Daemon nhận diện chữ OCR & ONNX runtime (Rust)
+    ├── zcall-audio/          # Engine âm thanh cuộc gọi: micro/loa, Opus, jitter buffer, AEC (Rust)
+    ├── zocr/                 # Daemon nhận diện chữ OCR & ONNX runtime (Rust)
+    └── zportal/              # Chụp màn hình qua XDG desktop portal (Rust)
 ```
 
 ## Biên dịch Native Addons

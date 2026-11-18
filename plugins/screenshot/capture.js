@@ -106,47 +106,37 @@ function tryGrim(outFile) {
   });
 }
 
+// Zalo's app/ tree, outside app.asar: the build puts zportal next to the
+// screenshot font in app/screenshot-assets/ (scripts/extract-screenshot-assets.js).
+const APP_DIR = fs.existsSync(path.join(__dirname, '..', '..', 'app'))
+  ? path.join(__dirname, '..', '..', 'app')
+  : path.join(path.dirname(process.execPath), 'app');
+
 /**
- * Resolves an executable path on the real filesystem for portal.py.
- * External binaries like python3 cannot execute files packaged inside app.asar.
+ * Resolves the zportal binary (native/engines/zportal, the portal client):
+ * app/screenshot-assets/zportal in a build, cargo's target/release in a dev
+ * checkout.
  *
+ * @param {string} [appDir]
  * @param {string} [baseDir]
- * @returns {string} Path to portal.py accessible on the filesystem
+ * @returns {string|null} Path to zportal, or null
  */
-function getPortalScriptPath(baseDir = __dirname) {
-  const defaultPath = path.join(baseDir, 'portal.py');
-  if (!defaultPath.includes('app.asar')) {
-    return defaultPath;
-  }
-
-  // 1. Check if electron-builder unpacked it into app.asar.unpacked
-  const unpackedPath = defaultPath.replace('app.asar', 'app.asar.unpacked');
-  if (fs.existsSync(unpackedPath)) {
-    return unpackedPath;
-  }
-
-  // 2. Fallback: extract the script to temp directory so external python3 can execute it
-  try {
-    const tempDir = path.join(os.tmpdir(), 'zalo-screencap');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-    const extractedPath = path.join(tempDir, 'portal.py');
-    const content = fs.readFileSync(defaultPath);
-    if (!fs.existsSync(extractedPath) || fs.statSync(extractedPath).size !== content.length) {
-      fs.writeFileSync(extractedPath, content, { mode: 0o755 });
-    }
-    return extractedPath;
-  } catch (err) {
-    console.error('[Screenshot Plugin] Failed to extract portal.py from asar:', err.message);
-    return defaultPath;
-  }
+function getPortalBinaryPath(appDir = APP_DIR, baseDir = __dirname) {
+  const candidates = [
+    path.join(appDir, 'screenshot-assets', 'zportal'),
+    path.join(baseDir, '..', '..', 'target', 'release', 'zportal')
+  ];
+  return candidates.find((p) => fs.existsSync(p)) || null;
 }
 
 function tryPortal(outFile) {
   return new Promise((resolve) => {
-    const scriptPath = getPortalScriptPath();
-    execFile('python3', [scriptPath, '--output', outFile], { timeout: 12000 }, (err, _stdout, stderr) => {
+    const binary = getPortalBinaryPath();
+    if (!binary) {
+      resolve({ success: false, error: 'zportal binary not found' });
+      return;
+    }
+    execFile(binary, ['--output', outFile], { timeout: 12000 }, (err, _stdout, stderr) => {
       if (!err && fs.existsSync(outFile) && fs.statSync(outFile).size > 1000) {
         resolve({ success: true });
       } else {
@@ -214,4 +204,4 @@ function tryImport(outFile) {
   });
 }
 
-module.exports = { captureScreen, getPortalScriptPath };
+module.exports = { captureScreen, getPortalBinaryPath };

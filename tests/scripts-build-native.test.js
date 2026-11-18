@@ -35,6 +35,7 @@ describe('Native Build Orchestrator & Downloads', () => {
 
     assert.ok(names.includes('zocr'), 'Expected engine zocr to be discovered');
     assert.ok(names.includes('zcall-audio'), 'Expected engine zcall-audio to be discovered');
+    assert.ok(names.includes('zportal'), 'Expected engine zportal to be discovered');
   });
 
   it('generates correct OnnxRuntime download URL for current architecture', () => {

@@ -2381,6 +2381,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zportal"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "zune-core"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

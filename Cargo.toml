@@ -12,6 +12,7 @@ members = [
     "native/addons/db-cross-v4",
     "native/engines/zocr",
     "native/engines/zcall-audio",
+    "native/engines/zportal",
 ]
 resolver = "2"
 

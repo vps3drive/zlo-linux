@@ -13,7 +13,6 @@ test('Screenshot Plugin - Built-in Linux Screen Capture', async (t) => {
   await t.test('verifies all required plugin code files exist', () => {
     assert.ok(fs.existsSync(path.join(pluginDir, 'index.js')), 'index.js exists');
     assert.ok(fs.existsSync(path.join(pluginDir, 'capture.js')), 'capture.js exists');
-    assert.ok(fs.existsSync(path.join(pluginDir, 'portal.py')), 'portal.py exists');
     assert.ok(fs.existsSync(path.join(pluginDir, 'ui', 'index.html')), 'ui/index.html exists');
     assert.ok(fs.existsSync(path.join(pluginDir, 'ui', 'screencap.css')), 'ui/screencap.css exists');
     assert.ok(fs.existsSync(path.join(pluginDir, 'ui', 'screencap.js')), 'ui/screencap.js exists');
@@ -56,33 +55,42 @@ test('Screenshot Plugin - Built-in Linux Screen Capture', async (t) => {
     }
   });
 
-  await t.test('verifies python portal script syntax and compilation', () => {
-    const portalScript = path.join(pluginDir, 'portal.py');
-    const res = spawnSync('python3', ['-m', 'py_compile', portalScript]);
-    assert.strictEqual(res.status, 0, `portal.py compilation failed: ${res.stderr.toString()}`);
+  await t.test('verifies capture module export and portal binary resolution', () => {
+    const { captureScreen, getPortalBinaryPath } = require('../plugins/screenshot/capture');
+    assert.strictEqual(typeof captureScreen, 'function');
+    assert.strictEqual(typeof getPortalBinaryPath, 'function');
+
+    // Dev checkout: app/screenshot-assets/zportal or cargo's target/release/zportal, if built.
+    const devPath = getPortalBinaryPath();
+    if (devPath !== null) {
+      assert.ok(fs.existsSync(devPath), 'resolved zportal exists');
+      assert.ok(devPath.endsWith('zportal'));
+    }
+
+    // A build: app/screenshot-assets/zportal comes first.
+    const mockAppDir = path.join(pluginDir, 'mock-portal-app');
+    fs.mkdirSync(path.join(mockAppDir, 'screenshot-assets'), { recursive: true });
+    fs.writeFileSync(path.join(mockAppDir, 'screenshot-assets', 'zportal'), '#!/bin/sh\n', { mode: 0o755 });
+    try {
+      assert.strictEqual(getPortalBinaryPath(mockAppDir), path.join(mockAppDir, 'screenshot-assets', 'zportal'));
+      assert.strictEqual(getPortalBinaryPath(path.join(mockAppDir, 'none'), mockAppDir), null);
+    } finally {
+      fs.rmSync(mockAppDir, { recursive: true, force: true });
+    }
   });
 
-  await t.test('verifies capture module export and portal script resolution in asar', () => {
-    const { captureScreen, getPortalScriptPath } = require('../plugins/screenshot/capture');
-    assert.strictEqual(typeof captureScreen, 'function');
-    assert.strictEqual(typeof getPortalScriptPath, 'function');
-
-    // In dev / non-asar environment
-    const normalPath = getPortalScriptPath();
-    assert.ok(fs.existsSync(normalPath), 'normal portal.py exists');
-    assert.ok(normalPath.endsWith('portal.py'));
-
-    // Simulated asar path where unpacked counterpart exists
-    const mockAsarDir = path.join(pluginDir, 'mock.app.asar');
-    const mockUnpackedDir = path.join(pluginDir, 'mock.app.asar.unpacked');
-    fs.mkdirSync(mockUnpackedDir, { recursive: true });
-    fs.writeFileSync(path.join(mockUnpackedDir, 'portal.py'), '# mock unpacked');
-    try {
-      const resolved = getPortalScriptPath(mockAsarDir);
-      assert.strictEqual(resolved, path.join(mockUnpackedDir, 'portal.py'));
-    } finally {
-      fs.rmSync(mockUnpackedDir, { recursive: true, force: true });
+  await t.test('verifies zportal reports a portal failure on stderr', (t2) => {
+    const bin = path.join(__dirname, '..', 'target', 'release', 'zportal');
+    if (!fs.existsSync(bin)) {
+      t2.skip('zportal release binary not built yet');
+      return;
     }
+    // No session bus: it must fail fast with a reason, not hang.
+    const res = spawnSync(bin, ['--output', path.join(require('os').tmpdir(), 'zportal-test.png')], {
+      encoding: 'utf8', timeout: 15000, env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent' }
+    });
+    assert.strictEqual(res.status, 1);
+    assert.match(res.stderr, /^Portal error: /);
   });
 
   await t.test('verifies screenshot plugin register function wraps screen-capture IPC', () => {

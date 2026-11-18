@@ -42,7 +42,9 @@ zalo-for-linux/
 │   │   └── zwalker           # Media-cache garbage collector
 │   └── engines/              # Standalone native subsystems
 │       ├── zcall             # Native call engine (signalling, ZRTP/SRTP media & Rust audio)
-│       └── zocr              # OCR engine host daemon & ONNX runtime integration
+│       ├── zcall-audio       # Call audio engine (mic/speaker, Opus, jitter buffer, AEC)
+│       ├── zocr              # OCR engine host daemon & ONNX runtime integration
+│       └── zportal           # Screenshot through the XDG desktop portal
 ├── package.json           # Project metadata + build config
 ├── package-lock.json      # Project lock files
 ├── plugins                # Zalo submodules/plugins

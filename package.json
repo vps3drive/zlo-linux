@@ -78,8 +78,6 @@
         "to": "zcall-native",
         "filter": [
           "**/*",
-          "!**/__pycache__/**",
-          "!**/*.pyc",
           "!audio/**",
           "!**/*.rs",
           "!**/Cargo.toml",
@@ -91,8 +89,7 @@
       }
     ],
     "asarUnpack": [
-      "**/*.node",
-      "plugins/screenshot/portal.py"
+      "**/*.node"
     ],
     "buildDependenciesFromSource": false,
     "nodeGypRebuild": false,

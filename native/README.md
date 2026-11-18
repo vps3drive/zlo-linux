@@ -18,7 +18,9 @@ native/
 │   └── zwalker/              # Media directory garbage collector (Rust)
 └── engines/                  # Standalone native subsystems
     ├── zcall/                # VoIP calling engine (signaling, ZRTP/SRTP & Rust audio)
-    └── zocr/                 # OCR engine host daemon & ONNX runtime integration (Rust)
+    ├── zcall-audio/          # Call audio engine: mic/speaker, Opus, jitter buffer, AEC (Rust)
+    ├── zocr/                 # OCR engine host daemon & ONNX runtime integration (Rust)
+    └── zportal/              # Screenshot through the XDG desktop portal (Rust)
 ```
 
 ## Building Native Addons

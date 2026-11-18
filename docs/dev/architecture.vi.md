@@ -45,7 +45,9 @@ zalo-for-linux/
 │   │   └── zwalker       # Bộ dọn rác bộ nhớ đệm media
 │   └── engines/      # Các hệ thống con độc lập
 │       ├── zcall     # Engine gọi điện native (tín hiệu, ZRTP/SRTP & Rust audio)
-│       └── zocr      # Daemon nhận diện chữ OCR & ONNX runtime
+│       ├── zcall-audio # Engine âm thanh cuộc gọi (micro/loa, Opus, jitter buffer, AEC)
+│       ├── zocr      # Daemon nhận diện chữ OCR & ONNX runtime
+│       └── zportal   # Chụp màn hình qua XDG desktop portal
 ├── package.json      # Metadata dự án + cấu hình electron-builder
 ├── plugins           # Các plugin/extension của Zalo for Linux
 │   ├── launcher-badge# Hiển thị số tin nhắn chưa đọc trên dock
