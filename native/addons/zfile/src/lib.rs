@@ -312,7 +312,12 @@ mod tests {
     #[test]
     fn test_can_read_and_write() {
         assert!(can_read("/etc/passwd".to_string()));
-        assert!(!can_write("/etc/passwd".to_string()));
         assert!(!can_read("".to_string()));
+        // root bypasses file permissions, so /etc/passwd is writable there.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping the not-writable check: running as root");
+            return;
+        }
+        assert!(!can_write("/etc/passwd".to_string()));
     }
 }
