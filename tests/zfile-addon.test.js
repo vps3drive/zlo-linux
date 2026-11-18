@@ -55,7 +55,8 @@ describe('zfile Native Rust Addon', () => {
   it('performs synchronous permission access checks correctly', { skip: !hasBinary ? 'zfile-native.node not compiled in clean checkout' : false }, () => {
     const mod = require(NODE_PATH);
     assert.strictEqual(mod.canRead('/etc/passwd'), true);
-    assert.strictEqual(mod.canWrite('/etc/passwd'), false);
+    // root bypasses file permissions: /etc/passwd is writable there.
+    if (process.getuid() !== 0) assert.strictEqual(mod.canWrite('/etc/passwd'), false);
     assert.strictEqual(mod.canReadAndWrite(os.tmpdir()), true);
     assert.strictEqual(mod.canRead(''), false);
   });
