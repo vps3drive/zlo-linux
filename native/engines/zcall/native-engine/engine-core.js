@@ -33,7 +33,10 @@ const GROUP_MEDIA_IDLE_MS = 10000;
 // Outgoing 1-1 call setup timeouts (ZCallConstParam):
 // - kDefaultToRingingTimeOut: 15000 ms (if peer does not reach 'ringing' / no network)
 // - kDefaultHandshakeTimeOut: 45000 ms (maximum ringing duration without answer)
-const CALL_SETUP_TIMEOUT_MS = Number(process.env.ZCALL_SETUP_TIMEOUT_MS) || 15000;
+// The wait for ring_ring is 45 s here, not 15 s: ring_ring usually comes after
+// 0.7-2 s, but a sleeping phone took 10 s, and calls cut at 15 s were reported as
+// "unreachable" while the phone may still have been ringing.
+const CALL_SETUP_TIMEOUT_MS = Number(process.env.ZCALL_SETUP_TIMEOUT_MS) || 45000;
 const RING_TIMEOUT_MS = Number(process.env.ZCALL_RING_TIMEOUT_MS) || 45000;
 
 // Zalo drops control events older than a minute. Within that window a cancel
