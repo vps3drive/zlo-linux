@@ -42,7 +42,12 @@ use zcall_media::zrtp::{self, cmd, msg, p2p, Packet};
 const INIT_WAIT: Duration = Duration::from_millis(600);
 const INIT_RETRY: Duration = Duration::from_millis(1000);
 const INIT_TRIES: u32 = 3;
-const PING_INTERVAL: Duration = Duration::from_millis(6000);
+/// Ping to the kept server, and while ringing to every server that answered
+/// InitZRTP (ZCALL_PING_MS: shorter for the tests).
+fn ping_interval() -> Duration {
+    let ms = std::env::var("ZCALL_PING_MS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&v| v > 0).unwrap_or(6000);
+    Duration::from_millis(ms)
+}
 const TWCC_INTERVAL: Duration = Duration::from_millis(50);
 const RTCP_REPORT_INTERVAL: Duration = Duration::from_millis(1000);
 const RTCP_LOG_MS: f64 = 5000.0;
@@ -202,6 +207,7 @@ enum Event {
 enum Timer {
     InitFinish,
     InitRetry,
+    RingPing,
     Ping,
     Status,
     ReqForward8,
@@ -269,6 +275,13 @@ struct Reply {
     token: u32,
     rtt_ms: u64,
     public_addr: Option<String>,
+}
+
+/// Pings while the phone rings (between InitZRTP and start), for the log line.
+struct RingPing {
+    since: Instant,
+    sent: u64,
+    replies: u64,
 }
 
 struct Init {
@@ -351,6 +364,7 @@ struct Media {
     refused: HashSet<usize>,
     ended: HashSet<String>,
     init: Option<Init>,
+    ring_ping: Option<RingPing>,
     keys: Option<SessionKeys>,
     rtcp: Option<RtcpFeedback>,
     send_rate: Option<SendRate>,
@@ -419,6 +433,7 @@ impl Media {
             refused: HashSet::new(),
             ended: HashSet::new(),
             init: None,
+            ring_ping: None,
             keys: None,
             rtcp: None,
             send_rate: None,
@@ -707,6 +722,56 @@ impl Media {
         let s = &self.servers[b.server];
         let best_json = json!({"server": {"host": s.host, "port": s.port, "index": s.index}, "token": b.token, "rttMs": b.rtt_ms, "publicAddr": b.public_addr});
         out(json!({"ev": "prepared", "best": best_json, "port": self.local_port()}));
+        self.start_ring_ping();
+    }
+
+    // --- ring ping ---------------------------------------------------------------
+    //
+    // macOS CallController::_handleInitZRTPSuccessful starts a 6 s job,
+    // _sendRequestZRTPPing, as soon as InitZRTP has answers: before the call is
+    // connected it pings every server that gave a token, after that only the one
+    // in use. Without it the relay heard nothing from us while the phone rang;
+    // after a 13 s ring it answered nothing once the call started (tx 845, rx 0,
+    // only the 7 InitZRTP replies; 2026-11-18), while a call answered after 2.8 s
+    // was fine. Same as zrtc-media.js.
+
+    fn start_ring_ping(&mut self) {
+        self.stop_ring_ping(false);
+        if self.replies.is_empty() {
+            return;
+        }
+        let every = ping_interval();
+        self.ring_ping = Some(RingPing { since: Instant::now(), sent: 0, replies: 0 });
+        self.timers.add(every, true, Timer::RingPing);
+        log(format!("media: ping before answer: {} server(s) every {} s", self.replies.len(), fmt_num(every.as_millis() as f64 / 1000.0)));
+    }
+
+    fn send_ring_ping(&mut self) {
+        if self.ring_ping.is_none() {
+            return;
+        }
+        let targets: Vec<(usize, u32)> = self.replies.iter().map(|r| (r.server, r.token)).collect();
+        for (server, token) in targets {
+            let s = &self.servers[server];
+            if self.ended.contains(&format!("{}:{}", s.host, s.port)) {
+                continue;
+            }
+            let pkt = zrtp::ping(self.local_uid, token, &self.sess_id);
+            self.send_server(&pkt, Some(server), "Ping");
+            if let Some(rp) = self.ring_ping.as_mut() {
+                rp.sent += 1;
+            }
+        }
+    }
+
+    /// `log`: the line the field test looks at (replies = MsgType 2 other than
+    /// the InitZRTP answers, i.e. what the relays said to our pings while ringing).
+    fn stop_ring_ping(&mut self, log_it: bool) {
+        let Some(rp) = self.ring_ping.take() else { return };
+        self.timers.cancel(Timer::RingPing);
+        if log_it {
+            log(format!("media: ping before answer: {} sent, {} replies (MsgType 2) in {:.1} s of ringing", rp.sent, rp.replies, rp.since.elapsed().as_secs_f64()));
+        }
     }
 
     fn local_port(&self) -> u16 {
@@ -717,6 +782,7 @@ impl Media {
 
     fn start(&mut self, role: &str, rtp_ser_ip: Option<&str>, audio: Option<&Value>) {
         self.active = true;
+        self.stop_ring_ping(true);
         if !self.send_udp {
             log(format!("media: start role={role} (observe-only)"));
             return;
@@ -741,7 +807,8 @@ impl Media {
         log("media: started");
         self.started_at = now_ms();
         self.last_rx_at = now_ms();
-        self.timers.add(PING_INTERVAL, true, Timer::Ping);
+        self.on_timer(Timer::Ping); // the kept server, at once (then every 6 s)
+        self.timers.add(ping_interval(), true, Timer::Ping);
         self.timers.add(STATUS_INTERVAL, true, Timer::Status);
         self.timers.add(Duration::from_millis(200), false, Timer::ReqForward8);
         self.timers.add(Duration::from_millis(2000), true, Timer::MediaTimeout);
@@ -817,6 +884,7 @@ impl Media {
         self.started_at = 0.0;
         self.active = false;
         self.init = None;
+        self.stop_ring_ping(false);
         self.timers.clear();
         if let Some(mut a) = self.audio.take() {
             drop(a.stdin.take()); // zcall-audio stops when its stdin closes
@@ -845,6 +913,7 @@ impl Media {
         match t {
             Timer::InitFinish => self.init_finish(),
             Timer::InitRetry => self.init_retry(),
+            Timer::RingPing => self.send_ring_ping(),
             Timer::Ping => {
                 let pkt = zrtp::ping(self.local_uid, self.server_token, &self.sess_id);
                 self.send_server(&pkt, self.active_server, "Ping");
@@ -1069,6 +1138,11 @@ impl Media {
             _ => {}
         }
         let Some(p) = zrtp::unwrap(m) else { return };
+        if let (Some(rp), Packet::Control(c)) = (self.ring_ping.as_mut(), &p) {
+            if c.msg_type == msg::SERVER_REPLY && c.cmd != cmd::INIT_CALL_CALLER && c.cmd != cmd::INIT_CALL_CALLEE {
+                rp.replies += 1;
+            }
+        }
         match p {
             Packet::Control(c) if c.msg_type == msg::SERVER_REPLY && (c.cmd == cmd::INIT_CALL_CALLER || c.cmd == cmd::INIT_CALL_CALLEE) => {
                 let Some(server) = self.servers.iter().position(|s| s.addr == Some(from)) else { return };
