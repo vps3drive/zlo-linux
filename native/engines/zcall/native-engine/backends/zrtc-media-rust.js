@@ -62,12 +62,12 @@ class RustMediaBackend extends EventEmitter {
     readline.createInterface({ input: proc.stderr }).on('line', (line) => { if (line.trim()) this.log('media(rust):', line); });
     proc.on('exit', (code, signal) => {
       const current = this.proc === proc;
+      // Always said, so a call that ends because the process died shows why
+      // (its panic message, if any, is on the lines above as media(rust)).
+      this.log('media: zcall-media exited', code === null ? signal : code, current ? '(during the call)' : '');
       if (current) this.proc = null;
       if (this._prepared && current) { this._prepared(null); this._prepared = null; }
-      if (current && code !== 0) {
-        this.log('media: zcall-media exited', code === null ? signal : code);
-        this.emit('failed', 'media-process');
-      }
+      if (current && code !== 0) this.emit('failed', 'media-process');
     });
     proc.on('error', (e) => this.log('media: zcall-media failed to start:', e.message));
   }
@@ -83,8 +83,18 @@ class RustMediaBackend extends EventEmitter {
     else if (m.ev === 'stats') { this._stats = m.stats; this.lastRxAt = m.lastRxAt || 0; }
     else if (m.ev === 'prepared') {
       this.port = m.port || 0;
-      if (this._prepared) { this._prepared(m.best || null); this._prepared = null; }
+      if (this._prepared) { this._prepared(this._best(m.best)); this._prepared = null; }
     }
+  }
+
+  // The reply prepare() resolves with, shaped as zrtc-media.js's: server.raw is
+  // the entry of params.servers, which the engine answers 416 / 12434 with.
+  _best(best) {
+    if (!best || !best.server) return null;
+    const list = Array.isArray(this.params && this.params.servers) ? this.params.servers : [];
+    const raw = list[best.server.index];
+    if (!raw) this.log('media: zcall-media chose a server that is not in the list', JSON.stringify(best.server));
+    return { ...best, server: { host: best.server.host, port: best.server.port, raw, family: 'udp4' } };
   }
 
   onNegotiated(params) {

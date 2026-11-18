@@ -20,6 +20,7 @@ const rtp = require(path.join(ENG, 'rtp'));
 const { ZrtcMediaBackend } = require(path.join(ENG, 'backends', 'zrtc-media'));
 const { packetizeFrame } = require(path.join(ENG, 'video'));
 const { RustMediaBackend, MediaSwitch, createRustMedia } = require(path.join(ENG, 'backends', 'zrtc-media-rust'));
+const { EngineCore } = require(path.join(ENG, 'engine-core'));
 
 const MEDIA_BIN = path.join(ROOT, 'target', 'release', 'zcall-media');
 const AUDIO_BIN = path.join(ROOT, 'target', 'release', 'zcall-audio');
@@ -212,5 +213,77 @@ describe('zcall-media process: a 1-1 call against a fake relay', () => {
     }
     assert.match(log, /media: stopped \{"tx":\d+,"rx":99,"rxBad":0,/);
     assert.ok(fs.statSync(path.join(outDir, 'played.raw')).size > 100 * 640, 'zcall-audio played the downlink');
+  });
+});
+
+// Outgoing 1-1 call through EngineCore: makeCall, then recvSignal 401 with the
+// media servers; the engine picks the fastest server and answers 416 with it
+// (best.server.raw). The Rust backend once returned the server without `raw`,
+// _send416 threw inside the promise and the engine process died.
+async function callerReaches416(t, makeMedia) {
+  const relay = dgram.createSocket('udp4');
+  t.after(() => relay.close());
+  await new Promise((r) => relay.bind(0, '127.0.0.1', r));
+  let uplink = 0;
+  relay.on('message', (m, rinfo) => {
+    if (m[0] === 3 && srtp.unprotectRtp(m.subarray(5), srtp.sessionKeys(srtp.masterFromSessId('S'.repeat(40))), 0)) uplink++;
+    if (m[0] !== 1) return;
+    const p = z.unwrapPacket(m);
+    if (p.cmd !== 11) return;
+    const h = z.buildControlHeader({ msgType: 2, cmd: 11, subCmd: 2, uid: 1 });
+    const addr = Buffer.from(`127.0.0.1|${rinfo.port}`, 'latin1');
+    const body = Buffer.alloc(14);
+    body.writeUInt32LE(5, 8); body.writeUInt16LE(addr.length, 12);
+    relay.send(Buffer.concat([h, body, addr]), rinfo.port, rinfo.address);
+  });
+  const frames = [];
+  const logs = [];
+  const media = makeMedia((...a) => logs.push(a.join(' ')));
+  const ui = { open() {}, status() {}, close() {}, onHangup() {}, incoming() {} };
+  const engine = new EngineCore({ emit: (f) => frames.push(f), media, log: (...a) => logs.push(a.join(' ')), ui });
+  t.after(() => { try { engine.hangup('test'); } catch (_) {} media.stop(); });
+  const rejections = [];
+  const onRejection = (e) => rejections.push(e);
+  process.on('unhandledRejection', onRejection);
+  t.after(() => process.off('unhandledRejection', onRejection));
+
+  engine.onZaloFrame({ type: 'request', command: 'makeCall', data: { type: 1, partner: [{ id: '1234567890123456789', name: 'Peer' }] } });
+  const callId = frames.find((f) => f.type === 'sendSignal' && f.command === 401).data.callId;
+  const port = relay.address().port;
+  const servers = [
+    { rtpaddr: '127.0.0.1:9', rtcpaddr: '127.0.0.1:10' }, // never answers
+    { rtpaddr: `127.0.0.1:${port}`, rtcpaddr: `127.0.0.1:${port + 1}`, id: 'the-one' },
+  ];
+  engine.onZaloFrame({ type: 'recvSignal', command: 401, data: { callId, servers, sessId: 'S'.repeat(40), fromId: 111, toId: 222, zrtc_config: {} } });
+  const deadline = Date.now() + 5000;
+  let s416;
+  while (!(s416 = frames.find((f) => f.type === 'sendSignal' && f.command === 416)) && Date.now() < deadline && !rejections.length) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.deepStrictEqual(rejections.map(String), [], 'no unhandled rejection on the caller path');
+  assert.ok(s416, `sendSignal 416 goes out (log: ${logs.slice(-5).join(' | ')})`);
+  assert.strictEqual(s416.data.rtpAddress, `127.0.0.1:${port}`, '416 names the server that answered');
+  assert.strictEqual(s416.data.rtcpAddress, `127.0.0.1:${port + 1}`);
+
+  // The phone picks up: media starts on that server, 408 goes out, and our
+  // microphone (zcall-audio's test tone here) reaches the relay as SRTP.
+  if (!fs.existsSync(AUDIO_BIN)) return;
+  engine.onZaloFrame({ type: 'control', data: { act: 'answer', callId, params: JSON.stringify({ rtpSerIp: `127.0.0.1:${port}` }) } });
+  assert.ok(frames.find((f) => f.type === 'sendSignal' && f.command === 408), '408 after the answer');
+  const until = Date.now() + 3000;
+  while (uplink < 20 && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+  assert.deepStrictEqual(rejections.map(String), []);
+  assert.ok(uplink >= 20, `uplink SRTP audio reaches the chosen server (${uplink} packets)`);
+}
+
+describe('outgoing 1-1 call: makeCall -> 401 -> 416 -> answer -> 408 + audio', () => {
+  const saved = process.env.ZCALL_AUDIO_ARGS;
+  process.env.ZCALL_AUDIO_ARGS = '--tone --out /dev/null';
+  process.on('exit', () => { if (saved === undefined) delete process.env.ZCALL_AUDIO_ARGS; else process.env.ZCALL_AUDIO_ARGS = saved; });
+  it('with zrtc-media.js', { timeout: 15000 }, (t) => callerReaches416(t, (log) => new ZrtcMediaBackend({ log, sendUdp: true })));
+
+  it('with zcall-media (ZCALL_MEDIA=rust)', { timeout: 15000 }, async (t) => {
+    if (!fs.existsSync(MEDIA_BIN)) { t.skip('zcall-media release binary not built yet'); return; }
+    await callerReaches416(t, (log) => new MediaSwitch({ log, sendUdp: true, bin: MEDIA_BIN }));
   });
 });

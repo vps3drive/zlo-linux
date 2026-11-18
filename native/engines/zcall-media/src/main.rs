@@ -260,6 +260,8 @@ struct Server {
     host: String,
     port: u16,
     addr: Option<SocketAddr>,
+    /// Position in params.servers: the engine answers 416 with that object.
+    index: usize,
 }
 
 struct Reply {
@@ -539,13 +541,13 @@ impl Media {
         };
         self.servers.clear();
         if let Some(list) = self.params.get("servers").and_then(Value::as_array).cloned() {
-            for s in &list {
+            for (index, s) in list.iter().enumerate() {
                 let addr = s.get("rtpaddr").filter(|v| v.as_str().map_or(false, |x| !x.is_empty()))
                     .or_else(|| s.get("rtp").filter(|v| v.as_str().map_or(false, |x| !x.is_empty())))
                     .or_else(|| s.get("rtpAddress"));
                 if let Some((host, port)) = parse_host_port(addr) {
                     let resolved = (host.as_str(), port).to_socket_addrs().ok().and_then(|mut a| a.find(|x| x.is_ipv4()));
-                    self.servers.push(Server { host, port, addr: resolved });
+                    self.servers.push(Server { host, port, addr: resolved, index });
                 }
             }
         }
@@ -703,7 +705,7 @@ impl Media {
         self.server_token = b.token;
         log(format!("media: {}/{} servers answered, best rtt {} ms", self.replies.len(), self.servers.len(), b.rtt_ms));
         let s = &self.servers[b.server];
-        let best_json = json!({"server": {"host": s.host, "port": s.port}, "token": b.token, "rttMs": b.rtt_ms, "publicAddr": b.public_addr});
+        let best_json = json!({"server": {"host": s.host, "port": s.port, "index": s.index}, "token": b.token, "rttMs": b.rtt_ms, "publicAddr": b.public_addr});
         out(json!({"ev": "prepared", "best": best_json, "port": self.local_port()}));
     }
 
@@ -1603,6 +1605,11 @@ fn signal_name(sig: i32) -> String {
 fn main() {
     // A closed stdout (Node gone) must not kill us mid-EndCall.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    // A panic says where, in the engine's log, before the process exits.
+    std::panic::set_hook(Box::new(|info| {
+        log(format!("media: zcall-media panic: {info}"));
+        eprintln!("{info}");
+    }));
     let (tx, rx): (Sender<Event>, Receiver<Event>) = mpsc::channel();
     let stdin_tx = tx.clone();
     std::thread::spawn(move || {

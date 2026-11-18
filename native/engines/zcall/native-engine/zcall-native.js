@@ -48,14 +48,25 @@ if (!token) { console.error('need --token <TK> (the value Zalo passes on the com
 
 const key = loadKey();
 const stamp = () => new Date().toISOString().slice(11, 23);
-const logFile = process.env.ZCALL_LOG_DIR
-  ? fs.createWriteStream(path.join(process.env.ZCALL_LOG_DIR, `native-engine-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`), { flags: 'a' })
-  : null;
+// Written synchronously: a write stream loses its last lines when the process
+// exits right after them, which hid why the engine died (an exception in a
+// promise of the outgoing-call path, 2026-11-18).
+let logFd = null;
+if (process.env.ZCALL_LOG_DIR) {
+  try {
+    logFd = fs.openSync(path.join(process.env.ZCALL_LOG_DIR, `native-engine-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.log`), 'a');
+  } catch (e) { console.error('native-engine log:', e.message); }
+}
 const log = (...a) => {
   const line = util.format(stamp(), '[zcall-native]', ...a);
-  if (logFile) logFile.write(line + '\n'); else console.error(line);
+  if (logFd === null) { console.error(line); return; }
+  try { fs.writeSync(logFd, line + '\n'); } catch (_) { console.error(line); }
 };
-process.on('uncaughtException', (e) => { log('uncaught', e.stack || e); process.exit(1); });
+process.on('uncaughtException', (e) => { log('uncaught', e && e.stack || e); process.exit(1); });
+// A rejected promise nobody handles would end the process as an uncaught
+// exception anyway; say which one, then go the same way.
+process.on('unhandledRejection', (e) => { log('unhandled rejection', e && e.stack || e); process.exit(1); });
+process.on('exit', (code) => { if (code) log(`exit ${code}`); });
 log(`start: media=${mediaMode} sendUdp=${sendUdp} group=${group} ports ${recvPort}/${sendPort}`);
 
 // recv socket: we write engine->zalo frames here.
