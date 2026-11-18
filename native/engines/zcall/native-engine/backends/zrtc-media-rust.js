@@ -4,9 +4,11 @@
 // UDP socket, SRTP, RTCP and send-rate, and runs zcall-audio itself, so audio
 // frames no longer pass through this event loop.
 //
-// Scope of this step: 1-1 audio. Video is received only for transport-cc
-// (not shown), our camera and screen are not sent, and group calls stay on
-// zrtc-media.js (MediaSwitch picks the backend per call).
+// Scope: 1-1 calls, audio and video both ways (the phone's video goes to the
+// engine's VideoAssembler as before; our camera / 1-1 screen frames go to the
+// process, which packetizes, encrypts and paces them). Group calls stay on
+// zrtc-media.js (MediaSwitch picks the backend per call). Video payloads
+// cross the pipe as base64 inside the JSON lines.
 //
 // Control is one JSON object per line on the process's stdin / stdout (see
 // native/engines/zcall-media/src/main.rs). Its log lines come back as
@@ -75,7 +77,9 @@ class RustMediaBackend extends EventEmitter {
     try { m = JSON.parse(line); } catch (_) { this.log('media(rust):', line); return; }
     if (m.ev === 'log') { this.log(m.msg); return; }
     if (proc !== this.proc) return; // a stopped call's process finishing up
-    if (m.ev === 'emit') this.emit(m.name, ...(m.args || []));
+    if (m.ev === 'video') {
+      this.emit('video', { seq: m.seq, ts: m.ts, pt: m.pt, marker: m.marker, payload: Buffer.from(m.payload, 'base64'), roc: m.roc, ssrc: m.ssrc });
+    } else if (m.ev === 'emit') this.emit(m.name, ...(m.args || []));
     else if (m.ev === 'stats') { this._stats = m.stats; this.lastRxAt = m.lastRxAt || 0; }
     else if (m.ev === 'prepared') {
       this.port = m.port || 0;
@@ -153,9 +157,19 @@ class RustMediaBackend extends EventEmitter {
     this._send({ cmd: 'device', kind, name: name || '' });
   }
 
-  // Not in this step: camera, screen share and group video.
-  sendVideoFrame() { }
-  requestPeerKeyFrame() { }
+  // One encoded frame from the call window (H.264 Annex-B): camera, or the
+  // screen in a 1-1 call (same stream, as zrtc-media.js sends it).
+  sendVideoFrame({ key, data }) {
+    if (!this.proc || !data || !data.length) return;
+    // ui-client decodes the window's base64 into a Buffer; it goes on as base64.
+    this._send({ cmd: 'videoFrame', key: !!key, data: (Buffer.isBuffer(data) ? data : Buffer.from(data)).toString('base64') });
+  }
+
+  requestPeerKeyFrame(why, mediaSsrc) {
+    this._send({ cmd: 'keyRequest', why: String(why || ''), ssrc: Number(mediaSsrc) || 0 });
+  }
+
+  // Group calls only (they run on zrtc-media.js).
   setGroupCamera() { }
   startShare() { }
   stopShare() { }
@@ -216,7 +230,7 @@ function createRustMedia({ log, sendUdp }) {
     log('media: ZCALL_MEDIA=rust but the zcall-media binary is missing; using zrtc-media.js');
     return new ZrtcMediaBackend({ log, sendUdp });
   }
-  log(`media: rust media backend ${bin} (1-1 audio; group calls on zrtc-media.js)`);
+  log(`media: rust media backend ${bin} (1-1 audio and video; group calls on zrtc-media.js)`);
   return new MediaSwitch({ log, sendUdp, bin });
 }
 

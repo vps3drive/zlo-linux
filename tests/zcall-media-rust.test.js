@@ -18,6 +18,7 @@ const z = require(path.join(ENG, 'zrtp-packet'));
 const srtp = require(path.join(ENG, 'srtp-aes'));
 const rtp = require(path.join(ENG, 'rtp'));
 const { ZrtcMediaBackend } = require(path.join(ENG, 'backends', 'zrtc-media'));
+const { packetizeFrame } = require(path.join(ENG, 'video'));
 const { RustMediaBackend, MediaSwitch, createRustMedia } = require(path.join(ENG, 'backends', 'zrtc-media-rust'));
 
 const MEDIA_BIN = path.join(ROOT, 'target', 'release', 'zcall-media');
@@ -85,7 +86,7 @@ function toneFrames(n) {
 }
 
 describe('zcall-media process: a 1-1 call against a fake relay', () => {
-  it('connects, plays the downlink, sends SRTP audio and hangs up', { timeout: 30000 }, async (t) => {
+  it('connects, plays the downlink, sends SRTP audio and video, and hangs up', { timeout: 30000 }, async (t) => {
     if (!fs.existsSync(MEDIA_BIN) || !fs.existsSync(AUDIO_BIN)) {
       t.skip('zcall-media / zcall-audio release binaries not built yet');
       return;
@@ -105,7 +106,8 @@ describe('zcall-media process: a 1-1 call against a fake relay', () => {
     const sessId = 'S'.repeat(20) + '0123456789abcdefghijklmnopqrstuvwxyz';
     const keys = srtp.sessionKeys(srtp.masterFromSessId(sessId));
     const LOCAL = 111222333, PEER = 444555666, CALL = 777888, TOKEN = 0x01020304;
-    const seen = { up: 0, upBad: 0, endCall: 0, twcc: 0, p2pBind: 0 };
+    const seen = { up: 0, upBad: 0, endCall: 0, twcc: 0, p2pBind: 0, nack: 0, upFrames: [] };
+    let upParts = [];
     const server = dgram.createSocket('udp4');
     const peer = dgram.createSocket('udp4');
     t.after(() => { server.close(); peer.close(); });
@@ -128,19 +130,48 @@ describe('zcall-media process: a 1-1 call against a fake relay', () => {
         else if (srtp.unprotectRtp(m.subarray(5), keys, 0)) seen.up++;
         else seen.upBad++;
       } else if (m[0] === 5) seen.twcc++;
+      else if (m[0] === 13) {
+        // Our camera: decrypt and put the frame back together.
+        const un = srtp.unprotectRtp(m.subarray(5), keys, 0);
+        if (!un) { seen.upBad++; return; }
+        const p = un.opus;
+        upParts.push(p.length >= 2 && p[0] === 0x1c && (p[1] & 0x3f) === 0 ? p.subarray(2) : p);
+        if (m[6] & 0x80) { seen.upFrames.push(Buffer.concat(upParts)); upParts = []; }
+      } else if (m[0] === 15) {
+        for (let o = 5; o + 4 <= m.length; o += (m.readUInt16BE(o + 2) + 1) * 4) if (m[o + 1] === 205 && (m[o] & 0x1f) === 1) seen.nack++;
+      }
     });
     peer.on('message', (m) => { if (m[7] === 1) seen.p2pBind++; });
 
     const logs = [];
     const media = new RustMediaBackend({ log: (...a) => logs.push(a.join(' ')), sendUdp: true, bin: MEDIA_BIN });
     const events = [];
-    for (const ev of ['timeout', 'failed', 'peerEnd', 'audioFault']) media.on(ev, (...a) => events.push([ev, ...a]));
+    for (const ev of ['timeout', 'failed', 'peerEnd', 'audioFault', 'keyframe']) media.on(ev, (...a) => events.push([ev, ...a]));
+    const video = [];
+    media.on('video', (v) => video.push(v));
     media.onNegotiated({ servers: [{ rtpaddr: `127.0.0.1:${server.address().port}` }], config: {}, srtpMode: 1, sessId,
       callId: CALL, role: 'caller', localUid: LOCAL, peerUid: PEER, p2pCandidates: [{ ip: '127.0.0.1', port: peer.address().port }] });
     const best = await media.prepare('caller');
     assert.strictEqual(best.token, TOKEN);
     assert.strictEqual(best.publicAddr, `127.0.0.1|${media.port}`);
     media.start('caller', null);
+    // The phone's video: 10 frames of 3 fragments; one fragment lost (NACK).
+    const phoneFrames = [];
+    let vseq = 100;
+    for (let f = 0; f < 10; f++) {
+      const frame = Buffer.concat([Buffer.from([0, 0, 0, 1, f === 0 ? 0x67 : 0x41]), Buffer.alloc(2500, f + 1)]);
+      phoneFrames.push(frame);
+      packetizeFrame(frame).forEach((ch, ci, all) => {
+        const s = vseq++;
+        if (s === 112) return;
+        const hdr = rtp.buildAudioRtpHeader({ seq: s, ts: 9000 * f, ssrc: PEER, twSeq: 1000 + s, marker: ci === all.length - 1, pt: f === 0 ? 98 : 97 });
+        server.send(Buffer.concat([Buffer.from([0x0e]), srtp.protectRtp(hdr, ch, keys, s, PEER, 0)]), client.port, client.address);
+      });
+    }
+    // Our camera: a delta before any key frame is dropped (and a key frame
+    // asked for), then a 20 KB key frame (paced) and two deltas.
+    const camera = [false, true, false, false].map((key, n) => ({ key, data: Buffer.concat([Buffer.from([0, 0, 0, 1, key ? 0x65 : 0x41]), Buffer.alloc(key ? 20000 : 3000, n + 7)]) }));
+    for (const f of camera) media.sendVideoFrame(f);
     const t0 = Date.now();
     for (let i = 0; i < 100; i++) {
       const seq = (0xffd0 + i) & 0xffff; // wraps: ROC 1 halfway through
@@ -160,7 +191,14 @@ describe('zcall-media process: a 1-1 call against a fake relay', () => {
     media.stop();
     await new Promise((r) => setTimeout(r, 1500));
 
-    assert.deepStrictEqual(events, [['peerEnd']]);
+    assert.deepStrictEqual(events, [['keyframe', 'start'], ['peerEnd']]);
+    // Video from the phone reaches the engine as RTP payloads, the missing one NACKed.
+    assert.strictEqual(video.length, 29);
+    assert.ok(video.every((v) => v.ssrc === PEER && Buffer.isBuffer(v.payload)));
+    assert.deepStrictEqual(Buffer.concat(video.slice(0, 3).map((v) => v.payload.subarray(2))), phoneFrames[0]);
+    assert.ok(seen.nack >= 1, 'NACK for the lost video packet');
+    // Our camera reaches the relay whole: the key frame and the deltas after it.
+    assert.deepStrictEqual(seen.upFrames, camera.slice(1).map((f) => f.data));
     assert.strictEqual(stats.rx, 99, 'every downlink packet but the dropped one, across the ROC wrap');
     assert.strictEqual(stats.rxBad, 0);
     assert.ok(seen.up >= 50 && seen.upBad === 0, `uplink SRTP audio decrypts with the session keys (${seen.up} ok, ${seen.upBad} bad)`);
@@ -169,7 +207,7 @@ describe('zcall-media process: a 1-1 call against a fake relay', () => {
     assert.strictEqual(seen.endCall, 1, 'EndCall once at stop');
     const log = logs.join('\n');
     for (const line of ['media: negotiated { servers: 1, srtpMode: 1, sendUdp: true }', 'media: started', 'media: first audio from peer',
-      'media: EndCall from the active server', 'media: zcall-audio exited 0']) {
+      'media: EndCall from the active server', 'media: zcall-audio exited 0', 'media: first video from peer (PT 98)']) {
       assert.ok(log.includes(line), `log has "${line}"`);
     }
     assert.match(log, /media: stopped \{"tx":\d+,"rx":99,"rxBad":0,/);

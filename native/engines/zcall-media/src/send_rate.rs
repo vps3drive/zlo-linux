@@ -52,7 +52,7 @@ fn num(v: Option<&Value>, d: f64) -> f64 {
 }
 
 /// `${x}` of a JS value.
-fn js_str(v: &Value) -> String {
+pub fn js_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Number(n) => fmt_num(n.as_f64().unwrap_or(f64::NAN)),

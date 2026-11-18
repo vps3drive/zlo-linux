@@ -1,7 +1,9 @@
-//! zcall-media: the media side of a 1-1 call (ZCALL_MEDIA=rust), in place of
+//! zcall-media: the media side of a 1-1 call (ZCALL_MEDIA=rust: audio and
+//! video, both ways), in place of
 //! backends/zrtc-media.js. It owns the UDP socket (relay server and P2P),
 //! SRTP, the RTCP we owe the peer and the send-rate controller, and runs
-//! zcall-audio itself, so audio frames no longer pass through Node.
+//! zcall-audio itself, so audio frames no longer pass through Node. Video
+//! frames still come from and go to the call window through the engine.
 //!
 //! Control from backends/zrtc-media-rust.js, one JSON object per line:
 //!   stdin   {"cmd":"negotiated","params":{..},"sendUdp":true}
@@ -9,11 +11,14 @@
 //!           {"cmd":"start","role":"callee","rtpSerIp":"ip:port","audio":{"bin":..,"args":[..]}}
 //!           {"cmd":"mute","on":true} {"cmd":"speaker","off":true}
 //!           {"cmd":"micVolume","pct":70} {"cmd":"device","kind":"mic","name":".."}
+//!           {"cmd":"videoFrame","key":true,"data":"<base64 Annex-B>"}  our camera
+//!           {"cmd":"keyRequest","why":"..","ssrc":0}   PLI to the phone
 //!           {"cmd":"stop"}  then stdin closes and the process exits
 //!   stdout  {"ev":"log","msg":".."}            a line for native-engine-*.log
 //!           {"ev":"prepared","best":{..}|null,"port":N}
 //!           {"ev":"emit","name":"timeout","args":[..]}   a backend event
-//!           {"ev":"stats","stats":{..},"lastRxAt":ms}    once a second and at stop
+//!           {"ev":"stats","stats":{..},"lastRxAt":ms}    every 250 ms and at stop
+//!           {"ev":"video","seq","ts","pt","marker","payload":"<base64>","roc","ssrc"}
 //!
 //! Every log line is the one zrtc-media.js writes for the same event, so the
 //! two engines' logs can be diffed. Timings and thresholds are zrtc-media.js's.
@@ -27,9 +32,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
 use zcall_media::json::num;
-use zcall_media::rtcp::{Kind, RtcpFeedback};
+use zcall_media::rtcp::{self as rtcp_mod, Kind, NackTracker, RtcpFeedback};
 use zcall_media::rtp;
-use zcall_media::send_rate::{fmt_num, Options, SendRate};
+use zcall_media::send_rate::{fmt_num, js_str, Options, SendRate};
 use zcall_media::srtp::{self, RocTracker, SessionKeys};
 use zcall_media::zrtp::{self, cmd, msg, p2p, Packet};
 
@@ -47,6 +52,16 @@ const MEDIA_TIMEOUT_MS: f64 = 20000.0;
 const P2P_BIND_FAST: Duration = Duration::from_millis(100);
 const P2P_BIND_SLOW: Duration = Duration::from_millis(400);
 const P2P_BIND_GIVE_UP: Duration = Duration::from_millis(15000);
+const PLI_MIN_GAP_MS: f64 = 1000.0; // one key frame request per second at most
+const VIDEO_TX_LOG_MS: f64 = 5000.0;
+// A frame of more packets than this goes out VIDEO_BURST packets (each path)
+// per 1 ms tick: a 720p key frame is 30-70 packets, and sent at once a relay
+// or a home router drops the tail.
+const VIDEO_BURST: usize = 8;
+const KEY_PT: u8 = 98;
+const DELTA_PT: u8 = 97;
+// The phone's fragments carry 1068 bytes (1070 with the 1c xx header).
+const MAX_CHUNK: usize = 1068;
 // stats() is read right before stop() for the call report: keep it fresh.
 const STATS_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -63,6 +78,76 @@ fn rand_below(n: u64) -> u64 {
     let mut b = [0u8; 8];
     unsafe { libc::getrandom(b.as_mut_ptr() as *mut libc::c_void, 8, 0) };
     u64::from_le_bytes(b) % n
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(b: &[u8]) -> String {
+    let mut o = String::with_capacity((b.len() + 2) / 3 * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        o.push(B64[(n >> 18) as usize & 63] as char);
+        o.push(B64[(n >> 12) as usize & 63] as char);
+        o.push(if c.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
+        o.push(if c.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+    }
+    o
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut o = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for ch in s.bytes() {
+        let v = match ch {
+            b'A'..=b'Z' => ch - b'A',
+            b'a'..=b'z' => ch - b'a' + 26,
+            b'0'..=b'9' => ch - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        } as u32;
+        acc = acc << 6 | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            o.push((acc >> bits) as u8);
+        }
+    }
+    Some(o)
+}
+
+/// One H.264 access unit (Annex-B) -> RTP payloads, the way the phone packs
+/// its own: whole if it fits, else 1c 80 / 1c 00 / 1c 40 fragments.
+fn packetize_frame(annex_b: &[u8]) -> Vec<Vec<u8>> {
+    if annex_b.len() <= MAX_CHUNK {
+        return vec![annex_b.to_vec()];
+    }
+    let mut out = Vec::new();
+    let mut off = 0;
+    while off < annex_b.len() {
+        let end = (off + MAX_CHUNK).min(annex_b.len());
+        let flag = if off == 0 { 0x80 } else if end == annex_b.len() { 0x40 } else { 0x00 };
+        let mut c = Vec::with_capacity(2 + end - off);
+        c.extend_from_slice(&[0x1c, flag]);
+        c.extend_from_slice(&annex_b[off..end]);
+        out.push(c);
+        off = end;
+    }
+    out
+}
+
+/// A JS object's key order: integer-like keys ascending, then the others in
+/// insertion order (so JSON matches JSON.stringify of the same counters).
+fn js_object(entries: &[(String, u64)]) -> Value {
+    let is_index = |k: &str| !k.is_empty() && (k == "0" || !k.starts_with('0')) && k.len() <= 10 && k.bytes().all(|b| b.is_ascii_digit()) && k.parse::<u64>().map_or(false, |v| v < 4294967295);
+    let mut idx: Vec<&(String, u64)> = entries.iter().filter(|(k, _)| is_index(k)).collect();
+    idx.sort_by_key(|(k, _)| k.parse::<u64>().unwrap());
+    let mut m = Map::new();
+    for (k, v) in idx.into_iter().chain(entries.iter().filter(|(k, _)| !is_index(k))) {
+        m.insert(k.clone(), json!(v));
+    }
+    Value::Object(m)
 }
 
 fn out(v: Value) {
@@ -125,6 +210,7 @@ enum Timer {
     Reports,
     P2pBind,
     Stats,
+    VideoDrain,
 }
 
 struct Timers {
@@ -210,7 +296,24 @@ struct VideoStats {
     pkts: u64,
     bad: u64,
     pt: BTreeMap<u8, u64>,
+    head: Vec<(String, u64)>,
     marker: u64,
+}
+
+struct VTxWin {
+    frames: u64,
+    keys: u64,
+    bytes: u64,
+    pkts: u64,
+    paced: u64,
+    since: f64,
+    last_tx: f64,
+}
+
+impl VTxWin {
+    fn new(now: f64, last_tx: f64) -> Self {
+        VTxWin { frames: 0, keys: 0, bytes: 0, pkts: 0, paced: 0, since: now, last_tx }
+    }
 }
 
 struct ATxWin {
@@ -259,8 +362,18 @@ struct Media {
     counters: Counters,
     rx_types: BTreeMap<u8, u64>,
     video: VideoStats,
-    video_noted: bool,
     key_requests: u64,
+    nack: Option<NackTracker>,
+    last_pli_at: f64,
+    pli_at: std::collections::HashMap<u32, f64>,
+    v_seq: u16,
+    v_roc: u32,
+    v_ts_base: u32,
+    v_start: f64,
+    v_tx: u64,
+    v_key_sent: bool,
+    v_out: std::collections::VecDeque<(Vec<u8>, Option<SocketAddr>, &'static str)>,
+    v_tx_win: VTxWin,
     p2p_path: Option<SocketAddr>,
     p2p_seen: bool,
     p2p_seq: u16,
@@ -317,8 +430,18 @@ impl Media {
             counters: Counters::default(),
             rx_types: BTreeMap::new(),
             video: VideoStats::default(),
-            video_noted: false,
             key_requests: 0,
+            nack: None,
+            last_pli_at: 0.0,
+            pli_at: std::collections::HashMap::new(),
+            v_seq: 0,
+            v_roc: 0,
+            v_ts_base: 0,
+            v_start: 0.0,
+            v_tx: 0,
+            v_key_sent: false,
+            v_out: std::collections::VecDeque::new(),
+            v_tx_win: VTxWin::new(now_ms(), 0.0),
             p2p_path: None,
             p2p_seen: false,
             p2p_seq: 0,
@@ -433,6 +556,7 @@ impl Media {
         self.reset_counters();
         let rtcp_on = std::env::var("ZCALL_RTCP").as_deref() != Ok("0") && self.local_uid != 0;
         self.rtcp = rtcp_on.then(|| RtcpFeedback::new(self.local_uid));
+        self.nack = self.rtcp.is_some().then(NackTracker::default);
         let rate_on = self.rtcp.is_some() && std::env::var("ZCALL_SEND_RATE").as_deref() != Ok("0");
         self.send_rate = None;
         if rate_on {
@@ -480,8 +604,17 @@ impl Media {
         self.counters = Counters::default();
         self.rx_types.clear();
         self.video = VideoStats::default();
-        self.video_noted = false;
         self.key_requests = 0;
+        self.last_pli_at = 0.0;
+        self.pli_at.clear();
+        self.v_seq = rand_below(0x8000) as u16;
+        self.v_roc = 0;
+        self.v_ts_base = rand_below(0x7fffffff) as u32;
+        self.v_start = 0.0;
+        self.v_tx = 0;
+        self.v_key_sent = false;
+        self.v_out.clear();
+        self.v_tx_win = VTxWin::new(now_ms(), 0.0);
         self.p2p_path = None;
         self.p2p_seen = false;
         self.p2p_seq = 0;
@@ -641,6 +774,7 @@ impl Media {
     }
 
     fn stop(&mut self) {
+        self.v_out.clear();
         self.send_stats();
         if let Some(sr) = self.send_rate.take() {
             let t = &sr.totals;
@@ -666,8 +800,8 @@ impl Media {
             stopped.insert("rxP2p".into(), json!(c.rx_p2p));
             stopped.insert("rxTypes".into(), Value::Object(self.rx_types.iter().map(|(k, v)| (k.to_string(), json!(v))).collect()));
             stopped.insert("video".into(), json!({"pkts": self.video.pkts, "bad": self.video.bad,
-                "pt": self.video.pt.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<Map<_, _>>(), "head": {}, "marker": self.video.marker}));
-            stopped.insert("videoTx".into(), json!(0));
+                "pt": self.video.pt.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<Map<_, _>>(), "head": js_object(&self.video.head), "marker": self.video.marker}));
+            stopped.insert("videoTx".into(), json!(self.v_tx));
             stopped.insert("keyRequests".into(), json!(self.key_requests));
             if let Some(r) = &self.rtcp {
                 stopped.insert("rtcp".into(), json!({"twcc": r.counters.twcc, "reports": r.counters.reports, "pli": r.counters.pli, "nack": r.counters.nack}));
@@ -740,6 +874,7 @@ impl Media {
             Timer::Reports => self.send_reports(),
             Timer::P2pBind => self.p2p_bind(),
             Timer::Stats => self.send_stats(),
+            Timer::VideoDrain => self.drain_video(),
         }
     }
 
@@ -772,9 +907,9 @@ impl Media {
         }
         let now = now_ms();
         if self.send_rate.is_some() {
-            // The camera is not sent by this backend yet: never "sending".
+            let sending = now - self.v_tx_win.last_tx < 1500.0;
             let loss = self.downlink_loss();
-            self.send_rate.as_mut().unwrap().tick(false, loss);
+            self.send_rate.as_mut().unwrap().tick(sending, loss);
         }
         let (ts, tx, octets) = (self.ts, self.counters.tx as u32, self.audio_octets as u32);
         let rep = self.rtcp.as_mut().unwrap().audio_report(now, ts, tx, octets);
@@ -790,7 +925,8 @@ impl Media {
             if r.video.started {
                 // JS reads a fresh block here, which also moves the interval counters.
                 if let Some(b) = r.video.block(now) {
-                    line += &format!("; video from phone: {} pkts, lost {}, jitter {}", self.video.pkts - self.video.bad, b.cum_lost, b.jitter);
+                    let received = r.video.counts().map_or(0, |c| c.1);
+                    line += &format!("; video from phone: {received} pkts, lost {}, jitter {}", b.cum_lost, b.jitter);
                 }
             }
             log(line);
@@ -1015,9 +1151,8 @@ impl Media {
         }
     }
 
-    /// Received video: not shown by this backend yet, but decrypted so its
-    /// transport-wide numbers reach the transport-cc we send (else the phone's
-    /// estimator reads every video packet as lost).
+    /// Received video: decrypt (own ROC: same SSRC as audio), NACK what is
+    /// missing, and hand the RTP payload to the engine's VideoAssembler.
     fn on_video(&mut self, rtp: &[u8]) {
         let Some(keys) = &self.keys else { return };
         if rtp.len() < 12 {
@@ -1026,27 +1161,180 @@ impl Media {
         let seq = u16::from_be_bytes([rtp[2], rtp[3]]);
         let roc = self.video_roc.guess(seq);
         self.video.pkts += 1;
-        if srtp::unprotect_rtp(rtp, keys, roc).is_none() {
+        let Some(got) = srtp::unprotect_rtp(rtp, keys, roc) else {
             self.video.bad += 1;
             return;
-        }
+        };
         self.video_roc.update(seq, roc);
         self.last_rx_at = now_ms();
         if let Some(r) = self.rtcp.as_mut() {
             r.on_rtp(Kind::Video, rtp, self.last_rx_at);
         }
+        if let (Some(nack), true) = (self.nack.as_mut(), self.rtcp.is_some()) {
+            let items = nack.note(got.ssrc, seq, self.last_rx_at);
+            for (ssrc, seqs) in items {
+                let pkt = rtcp_mod::build_nack(self.local_uid, ssrc, &seqs);
+                self.send_rtcp(true, &pkt);
+                self.rtcp.as_mut().unwrap().counters.nack += 1;
+            }
+        }
         let pt = rtp[1] & 0x7f;
+        let marker = rtp[1] & 0x80 != 0;
+        let ts = u32::from_be_bytes([rtp[4], rtp[5], rtp[6], rtp[7]]);
         *self.video.pt.entry(pt).or_insert(0) += 1;
-        if rtp[1] & 0x80 != 0 {
+        if marker {
             self.video.marker += 1;
+        }
+        let head = hex(&got.payload[..got.payload.len().min(2)]);
+        match self.video.head.iter_mut().find(|(k, _)| *k == head) {
+            Some((_, n)) => *n += 1,
+            None => self.video.head.push((head, 1)),
         }
         if self.video.pkts == 1 {
             log(format!("media: first video from peer (PT {pt})"));
         }
-        if !self.video_noted {
-            self.video_noted = true;
-            log("media: video is not shown with ZCALL_MEDIA=rust yet (audio only)");
+        if std::env::var_os("ZCALL_DUMP_VIDEO").map_or(false, |v| !v.is_empty()) {
+            if let Some(dir) = std::env::var_os("ZCALL_LOG_DIR").filter(|d| !d.is_empty()) {
+                // record: u32 len, u16 seq, u32 ts, u8 pt|marker<<7, payload
+                let mut rec = Vec::with_capacity(11 + got.payload.len());
+                rec.extend_from_slice(&((got.payload.len() + 7) as u32).to_be_bytes());
+                rec.extend_from_slice(&seq.to_be_bytes());
+                rec.extend_from_slice(&ts.to_be_bytes());
+                rec.push(pt | if marker { 0x80 } else { 0 });
+                rec.extend_from_slice(&got.payload);
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::path::Path::new(&dir).join("video-dump.bin")) {
+                    let _ = f.write_all(&rec);
+                }
+            }
         }
+        out(json!({"ev": "video", "seq": seq, "ts": ts, "pt": pt, "marker": marker, "payload": b64_encode(&got.payload), "roc": roc, "ssrc": got.ssrc}));
+    }
+
+    // --- our camera ------------------------------------------------------------------
+
+    /// One encoded frame from the call window (H.264 Annex-B). Same RTP layout
+    /// as the phone's video: SSRC = our UID, 90 kHz clock, PT 98 key / 97
+    /// other, transport-cc extension, marker on the last packet. Relay MsgType
+    /// 13 with the token, P2P kind 8. Until a key frame went out, other frames
+    /// are useless to the phone: they are dropped and a key frame is asked for.
+    fn send_video_frame(&mut self, key: bool, data: &[u8]) {
+        if !self.active || self.active_server.is_none() || self.started_at == 0.0 {
+            return;
+        }
+        let Some(keys) = self.keys.clone() else { return };
+        if !key && !self.v_key_sent {
+            emit("keyframe", json!(["start"]));
+            return;
+        }
+        if key {
+            self.v_key_sent = true;
+        }
+        let now = now_ms();
+        if self.v_start == 0.0 {
+            self.v_start = now;
+        }
+        let ts = ((self.v_ts_base as f64 + (now - self.v_start) * 90.0) as i64) as u32;
+        let chunks = packetize_frame(data);
+        let n = chunks.len();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let hdr = rtp::audio_header(self.v_seq, ts, self.local_uid, self.tw_seq, i == n - 1, if key { KEY_PT } else { DELTA_PT });
+            let pkt = srtp::protect_rtp(&hdr, chunk, &keys, self.v_seq, self.local_uid, self.v_roc);
+            let relay = zrtp::wrap_media(msg::VIDEO_RTP, self.server_token, &pkt);
+            let p2p = self.p2p_path.map(|to| (zrtp::p2p_wrap(self.callee, self.call_id, p2p::VIDEO, &pkt), to));
+            let server = self.active_server.and_then(|i| self.server_addr(i));
+            if n > VIDEO_BURST || !self.v_out.is_empty() {
+                self.v_out.push_back((relay, server, "video"));
+                if let Some((b, to)) = p2p {
+                    self.v_out.push_back((b, Some(to), "P2P video"));
+                }
+                self.v_tx_win.paced += 1;
+            } else {
+                self.send_to(&relay, server, "video");
+                if let Some((b, to)) = p2p {
+                    self.send_to(&b, Some(to), "P2P video");
+                }
+            }
+            self.v_tx_win.bytes += pkt.len() as u64;
+            self.v_tx_win.pkts += 1;
+            let tw = self.tw_seq;
+            if let Some(s) = self.send_rate.as_mut() {
+                s.on_sent(tw, None);
+            }
+            self.v_seq = self.v_seq.wrapping_add(1);
+            if self.v_seq == 0 {
+                self.v_roc += 1;
+            }
+            self.tw_seq = self.tw_seq.wrapping_add(1);
+        }
+        self.v_tx += 1;
+        if !self.v_out.is_empty() {
+            self.drain_video();
+        }
+        self.note_video_tx(key);
+    }
+
+    /// The queued video packets, VIDEO_BURST per path per 1 ms tick.
+    fn drain_video(&mut self) {
+        if !self.active {
+            self.v_out.clear();
+            return;
+        }
+        for _ in 0..VIDEO_BURST * 2 {
+            let Some((pkt, to, what)) = self.v_out.pop_front() else { break };
+            self.send_to(&pkt, to, what);
+        }
+        if !self.v_out.is_empty() && self.timers.list.iter().all(|t| t.2 != Timer::VideoDrain) {
+            self.timers.add(Duration::from_millis(1), false, Timer::VideoDrain);
+        }
+    }
+
+    /// What we really send, one line per 5 s.
+    fn note_video_tx(&mut self, key: bool) {
+        let now = now_ms();
+        let w = &mut self.v_tx_win;
+        w.frames += 1;
+        if key {
+            w.keys += 1;
+        }
+        w.last_tx = now;
+        if now - w.since < VIDEO_TX_LOG_MS {
+            return;
+        }
+        let sec = (now - w.since) / 1000.0;
+        let rung = self.send_rate.as_ref().map(|s| format!(", rung {}", js_str(&s.profile().rung))).unwrap_or_default();
+        log(format!(
+            "video tx: {:.1} fps, {} kbps, {} key, {} pkts ({} paced){rung}",
+            w.frames as f64 / sec,
+            fmt_num(rtcp_mod::js_round(w.bytes as f64 * 8.0 / sec / 1000.0)),
+            w.keys,
+            w.pkts,
+            w.paced
+        ));
+        self.v_tx_win = VTxWin::new(now, now);
+    }
+
+    /// Ask the phone for a key frame (a hole, or the decoder gave up): PLI on
+    /// the video RTCP channel, at most once a second per sender.
+    fn request_key_frame(&mut self, why: &str, media_ssrc: f64) {
+        if self.rtcp.is_none() {
+            return;
+        }
+        let now = now_ms();
+        let key = if media_ssrc.is_finite() && media_ssrc > 0.0 { (media_ssrc as i64) as u32 } else { 0 };
+        let stamp = if key != 0 { self.pli_at.get(&key).copied().unwrap_or(0.0) } else { self.last_pli_at };
+        if now - stamp < PLI_MIN_GAP_MS {
+            return;
+        }
+        let pli = if key != 0 { Some(rtcp_mod::build_pli(self.local_uid, key)) } else { self.rtcp.as_mut().unwrap().pli() };
+        let Some(pli) = pli else { return };
+        if key != 0 {
+            self.pli_at.insert(key, now);
+            self.rtcp.as_mut().unwrap().counters.pli += 1;
+        } else {
+            self.last_pli_at = now;
+        }
+        self.send_rtcp(true, &pli);
+        log(format!("rtcp: PLI to {} ({why})", if key != 0 { key.to_string() } else { "the phone".into() }));
     }
 
     // --- audio (zcall-audio) -----------------------------------------------------------
@@ -1280,6 +1568,14 @@ impl Media {
                 b.extend_from_slice(n);
                 self.audio_write(&b);
             }
+            "videoFrame" => {
+                let key = c.get("key").and_then(Value::as_bool).unwrap_or(false);
+                match s("data").and_then(b64_decode) {
+                    Some(d) if !d.is_empty() => self.send_video_frame(key, &d),
+                    _ => log("media: bad video frame from the window"),
+                }
+            }
+            "keyRequest" => self.request_key_frame(s("why").unwrap_or(""), num(c.get("ssrc"))),
             "stop" => {
                 self.stop();
                 return false;
