@@ -86,6 +86,7 @@ npm run main:build
 | `ZALO_KEEP_LOCALES` | Keep every Electron locale pack in the AppImage (default: keep `vi`, `en-US`, `en-GB`) | `ZALO_KEEP_LOCALES=1` |
 | `ZALO_TRIM_SWIFTSHADER` | Drop the software Vulkan fallback. Only useful when no GPU/VM fallback is needed | `ZALO_TRIM_SWIFTSHADER=1` |
 | `ZALO_TRIM_VULKAN` | Drop the Vulkan loader. Breaks hardware/software Vulkan acceleration | `ZALO_TRIM_VULKAN=1` |
+| `ZCALL_MEDIA` | Runtime, when starting Zalo: `rust` runs 1-1 call media in the `zcall-media` process (needs `npm run build:native`); unset = `zrtc-media.js`. Group calls always use `zrtc-media.js` | `ZCALL_MEDIA=rust ./Zalo*.AppImage` |
 
 ### Payload trimming
 

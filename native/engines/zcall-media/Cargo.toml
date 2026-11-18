@@ -9,7 +9,8 @@ authors = ["Việt Nam Linux Family"]
 [lib]
 path = "src/lib.rs"
 
-# The media process (ZCALL_MEDIA=rust): replaces backends/zrtc-media.js for 1-1 audio.
+# The media process (ZCALL_MEDIA=rust): replaces backends/zrtc-media.js for 1-1 calls
+# (audio, video, screen share); group calls stay on zrtc-media.js.
 [[bin]]
 name = "zcall-media"
 path = "src/main.rs"

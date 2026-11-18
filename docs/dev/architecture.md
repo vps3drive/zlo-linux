@@ -43,6 +43,7 @@ zalo-for-linux/
 │   └── engines/              # Standalone native subsystems
 │       ├── zcall             # Native call engine (signalling, ZRTP/SRTP media & Rust audio)
 │       ├── zcall-audio       # Call audio engine (mic/speaker, Opus, jitter buffer, AEC)
+│       ├── zcall-media       # Call media process for ZCALL_MEDIA=rust (1-1 calls)
 │       ├── zocr              # OCR engine host daemon & ONNX runtime integration
 │       └── zportal           # Screenshot through the XDG desktop portal
 ├── package.json           # Project metadata + build config
@@ -79,6 +80,23 @@ zalo-for-linux/
 └── dist/                  # Build output (AppImage, etc.)
 
 ```
+
+## Calls
+
+Zalo's own call helper (ZaloCall) is replaced by the native engine in
+`native/engines/zcall` (`zcall-native.js`, run on Zalo's Electron as Node),
+which `scripts/patches/patch-zcall-native.js` makes Zalo spawn and
+`plugins/zcall` configures. The engine does signalling with Zalo and the
+call window; the media has two backends, chosen with `ZCALL_MEDIA`:
+
+| `ZCALL_MEDIA` | 1-1 calls | Group calls |
+| --- | --- | --- |
+| unset / `zrtc` / `js` (default) | `backends/zrtc-media.js` in the engine, `zcall-audio` for sound | `zrtc-media.js` |
+| `rust` | the `zcall-media` process: socket, SRTP, RTCP, send rate, audio (it runs `zcall-audio`), video both ways and screen share | `zrtc-media.js` |
+
+Both backends write the same log lines to `native-engine-YYYYMMDD.log`
+(`~/.config/ZaloData`). See [native/README.md](../../native/README.md) for the
+binaries and how they are checked against each other.
 
 ## Build Pipeline
 

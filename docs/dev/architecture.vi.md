@@ -46,6 +46,7 @@ zalo-for-linux/
 │   └── engines/      # Các hệ thống con độc lập
 │       ├── zcall     # Engine gọi điện native (tín hiệu, ZRTP/SRTP & Rust audio)
 │       ├── zcall-audio # Engine âm thanh cuộc gọi (micro/loa, Opus, jitter buffer, AEC)
+│       ├── zcall-media # Tiến trình media cuộc gọi cho ZCALL_MEDIA=rust (cuộc gọi 1-1)
 │       ├── zocr      # Daemon nhận diện chữ OCR & ONNX runtime
 │       └── zportal   # Chụp màn hình qua XDG desktop portal
 ├── package.json      # Metadata dự án + cấu hình electron-builder
@@ -70,6 +71,23 @@ zalo-for-linux/
 │   ├── prepare-app.js# Giải nén app.asar và áp dụng các patch
 │   └── update-nix-sources.sh # Cập nhật mã băm vào nix/sources.json
 ```
+
+## Cuộc gọi
+
+Trình gọi riêng của Zalo (ZaloCall) được thay bằng engine native trong
+`native/engines/zcall` (`zcall-native.js`, chạy bằng Electron của Zalo ở chế
+độ Node). `scripts/patches/patch-zcall-native.js` cho Zalo chạy engine này,
+còn `plugins/zcall` cấu hình nó. Engine lo báo hiệu với Zalo và cửa sổ gọi;
+phần media có hai backend, chọn bằng `ZCALL_MEDIA`:
+
+| `ZCALL_MEDIA` | Cuộc gọi 1-1 | Cuộc gọi nhóm |
+| --- | --- | --- |
+| không đặt / `zrtc` / `js` (mặc định) | `backends/zrtc-media.js` trong engine, `zcall-audio` cho âm thanh | `zrtc-media.js` |
+| `rust` | tiến trình `zcall-media`: socket, SRTP, RTCP, send rate, âm thanh (tự chạy `zcall-audio`), video hai chiều và chia sẻ màn hình | `zrtc-media.js` |
+
+Hai backend ghi cùng các dòng log vào `native-engine-YYYYMMDD.log`
+(`~/.config/ZaloData`). Xem [native/README.vi.md](../../native/README.vi.md) về
+các binary và cách đối chiếu chúng với nhau.
 
 ## Build Pipeline
 

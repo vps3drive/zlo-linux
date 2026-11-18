@@ -19,9 +19,31 @@ native/
 └── engines/                  # Standalone native subsystems
     ├── zcall/                # VoIP calling engine (signaling, ZRTP/SRTP & Rust audio)
     ├── zcall-audio/          # Call audio engine: mic/speaker, Opus, jitter buffer, AEC (Rust)
+    ├── zcall-media/          # Call media process for ZCALL_MEDIA=rust: socket, SRTP, RTCP, video (Rust)
     ├── zocr/                 # OCR engine host daemon & ONNX runtime integration (Rust)
     └── zportal/              # Screenshot through the XDG desktop portal (Rust)
 ```
+
+## Call media backends (`ZCALL_MEDIA`)
+
+The call engine (`engines/zcall`, Node) keeps signalling and the call window;
+the media of a call runs in one of two backends:
+
+- `js` (default, `ZCALL_MEDIA` unset or `zrtc`): `engines/zcall/native-engine/backends/zrtc-media.js`
+  owns the UDP socket and SRTP/RTCP in the engine, and spawns `zcall-audio`.
+- `rust` (`ZCALL_MEDIA=rust`, opt-in): 1-1 calls run in the `zcall-media`
+  process (`engines/zcall-media`): relay and P2P socket, SRTP, transport-cc /
+  SR / RR / NACK / PLI, the send-rate controller, video both ways (camera, and
+  the screen, which a 1-1 call sends on the camera stream) and `zcall-audio`,
+  which it spawns itself. The engine talks to it through
+  `backends/zrtc-media-rust.js` (one JSON object per line); every log line is
+  the one `zrtc-media.js` writes, so the two can be diffed in
+  `native-engine-*.log`. **Group calls always use `zrtc-media.js`**, whatever
+  `ZCALL_MEDIA` says. Without the binary, `rust` falls back to `js`.
+
+`engines/zcall-media` is also a library crate (ZRTP packets, SRTP, RTP, RTCP,
+send-rate) checked against the JS modules with vectors they produce
+(`tests/gen-vectors.js`, `tests/vectors.rs`).
 
 ## Building Native Addons
 

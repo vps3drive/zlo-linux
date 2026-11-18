@@ -133,6 +133,20 @@ remote desktop có thể cần tới.
 - **Ghi đè bằng biến môi trường**: Đặt `ZALO_DEV_MODE=1` để bật cưỡng bức Chế độ nhà phát triển mà không thay đổi cấu hình đã lưu.
 - **Log terminal**: Khởi chạy với biến môi trường `ELECTRON_ENABLE_LOGGING=1`.
 
+## Engine gọi: `ZCALL_MEDIA`
+
+Biến này đặt lúc chạy Zalo, không phải lúc build. `ZCALL_MEDIA=rust` cho media
+của cuộc gọi 1-1 (âm thanh, video, chia sẻ màn hình) chạy trong tiến trình
+`zcall-media` (cần `npm run build:native` để có binary); không đặt thì dùng
+`zrtc-media.js` như trước. Cuộc gọi nhóm luôn dùng `zrtc-media.js`.
+
+```bash
+ZCALL_MEDIA=rust ./Zalo-*.AppImage
+```
+
+Test so khớp hai backend: `node --test tests/zcall-media-rust.test.js` (bỏ qua
+nếu chưa build binary) và `cargo test -p zcall-media`.
+
 ## Chạy kiểm thử tự động
 
 ```bash
