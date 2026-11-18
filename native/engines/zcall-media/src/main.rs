@@ -494,12 +494,12 @@ impl Media {
                             return;
                         }
                     }
-                    Err(e) => {
-                        // Closed on stop, or a transient error (ICMP unreachable).
-                        if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                            continue;
-                        }
-                        return;
+                    Err(_) => {
+                        // ICMP errors (port / host / net unreachable after a P2P
+                        // bind to a dead candidate) surface here: they must not
+                        // end reception. The thread ends with the process.
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
                     }
                 }
             }

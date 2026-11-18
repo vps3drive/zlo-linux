@@ -64,7 +64,7 @@ class RustMediaBackend extends EventEmitter {
       const current = this.proc === proc;
       // Always said, so a call that ends because the process died shows why
       // (its panic message, if any, is on the lines above as media(rust)).
-      this.log('media: zcall-media exited', code === null ? signal : code, current ? '(during the call)' : '');
+      this.log('media: zcall-media exited', code === null ? signal : code, current ? '(during the call)' : '(call stopped)');
       if (current) this.proc = null;
       if (this._prepared && current) { this._prepared(null); this._prepared = null; }
       if (current && code !== 0) this.emit('failed', 'media-process');
@@ -133,6 +133,8 @@ class RustMediaBackend extends EventEmitter {
     const proc = this.proc;
     if (!proc) return;
     this._send({ cmd: 'stop' });
+    // From here its exit is the planned one, not a failure of the call.
+    this.proc = null;
     try { proc.stdin.end(); } catch (_) { }
     // It sends EndCall, logs the call's totals and exits; this is the fallback.
     setTimeout(() => { try { proc.kill(); } catch (_) { } }, 3000).unref();

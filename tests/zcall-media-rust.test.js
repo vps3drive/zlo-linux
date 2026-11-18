@@ -287,3 +287,110 @@ describe('outgoing 1-1 call: makeCall -> 401 -> 416 -> answer -> 408 + audio', (
     await callerReaches416(t, (log) => new MediaSwitch({ log, sendUdp: true, bin: MEDIA_BIN }));
   });
 });
+
+// 1-1 screen share through EngineCore, as caller and as callee: the window
+// switches to the screen (12064 status 1 to the phone), its frames (a big key
+// frame that must be paced, then deltas) go out on the video stream, a delta
+// before any key frame is dropped and a key frame asked for, and 12064 status
+// 0 ends it. Returns what the relay received, to compare the two backends.
+async function screenShareCall(t, role, makeMedia) {
+  const sessId = 'S'.repeat(40);
+  const keys = srtp.sessionKeys(srtp.masterFromSessId(sessId));
+  const relay = dgram.createSocket('udp4');
+  t.after(() => relay.close());
+  await new Promise((r) => relay.bind(0, '127.0.0.1', r));
+  const port = relay.address().port;
+  const got = { frames: [], bad: 0 };
+  let parts = [];
+  relay.on('message', (m, rinfo) => {
+    if (m[0] === 13) {
+      const un = srtp.unprotectRtp(m.subarray(5), keys, 0);
+      if (!un) { got.bad++; return; }
+      const p = un.opus;
+      parts.push(p.length >= 2 && p[0] === 0x1c && (p[1] & 0x3f) === 0 ? p.subarray(2) : p);
+      if (m[6] & 0x80) { got.frames.push({ pt: m[6] & 0x7f, data: Buffer.concat(parts) }); parts = []; }
+      return;
+    }
+    if (m[0] !== 1) return;
+    const p = z.unwrapPacket(m);
+    if (p.cmd !== 11 && p.cmd !== 12) return;
+    const h = z.buildControlHeader({ msgType: 2, cmd: p.cmd, subCmd: 2, uid: 1 });
+    const addr = Buffer.from(`127.0.0.1|${rinfo.port}`, 'latin1');
+    const body = Buffer.alloc(14);
+    body.writeUInt32LE(5, 8); body.writeUInt16LE(addr.length, 12);
+    relay.send(Buffer.concat([h, body, addr]), rinfo.port, rinfo.address);
+  });
+
+  const frames = [];
+  const logs = [];
+  const log = (...a) => logs.push(a.join(' '));
+  const cb = {};
+  let keyAsks = 0;
+  let accept = null;
+  const ui = {
+    open() {}, status() {}, close() {}, onHangup() {}, video() {}, setCameraEncode() {},
+    incoming(_o, yes) { accept = yes; },
+    requestKeyFrame() { keyAsks++; },
+    onVideoFrame(f) { cb.videoFrame = f; },
+    onScreen(f) { cb.screen = f; },
+  };
+  const media = makeMedia(log);
+  const engine = new EngineCore({ emit: (f) => frames.push(f), media, log, ui });
+  t.after(() => { try { engine.hangup('test'); } catch (_) {} media.stop(); });
+  const rejections = [];
+  const onRejection = (e) => rejections.push(e);
+  process.on('unhandledRejection', onRejection);
+  t.after(() => process.off('unhandledRejection', onRejection));
+  const waitFor = async (pred, ms = 5000) => {
+    const until = Date.now() + ms;
+    while (!pred() && Date.now() < until && !rejections.length) await new Promise((r) => setTimeout(r, 20));
+    return pred();
+  };
+  const sig = (cmd) => frames.filter((f) => f.type === 'sendSignal' && f.command === cmd);
+
+  if (role === 'caller') {
+    engine.onZaloFrame({ type: 'request', command: 'makeCall', data: { type: 3, partner: [{ id: '1234567890123456789', name: 'Peer' }] } });
+    const callId = sig(401)[0].data.callId;
+    engine.onZaloFrame({ type: 'recvSignal', command: 401, data: { callId, servers: [{ rtpaddr: `127.0.0.1:${port}`, rtcpaddr: `127.0.0.1:${port}` }], sessId, fromId: 111, toId: 222, zrtc_config: {} } });
+    assert.ok(await waitFor(() => sig(416).length), `416 (log: ${logs.slice(-3).join(' | ')})`);
+    engine.onZaloFrame({ type: 'control', data: { act: 'answer', callId } });
+  } else {
+    const callId = 4242;
+    const params = { Dname: 'Peer', extendData: JSON.stringify({ callType: 1, serverAddr: [{ rtp: `127.0.0.1:${port}` }], p2p: [] }), zrtc_config: {} };
+    engine.onZaloFrame({ type: 'control', data: { act: 'request', data: { callId, uidN: '1234567890123456789', uidFrom: 222, uidTo: 111, session: sessId,
+      rtpAddress: `127.0.0.1:${port}`, rtcpAddress: `127.0.0.1:${port}`, params: JSON.stringify(params) } } });
+    assert.ok(accept, 'incoming call shown');
+    accept(false);
+    assert.ok(await waitFor(() => sig(402).length), `402 (log: ${logs.slice(-3).join(' | ')})`);
+  }
+  assert.ok(await waitFor(() => logs.some((l) => l.includes('media: started'))), 'media started');
+
+  cb.screen(true);
+  assert.deepStrictEqual(sig(12064).map((f) => f.data.status), [1]);
+  const screen = (n, key, size) => ({ key, screen: true, w: 1920, h: 1080,
+    data: Buffer.concat([Buffer.from([0, 0, 0, 1, key ? 0x65 : 0x41]), Buffer.alloc(size, n)]) });
+  const sent = [screen(0, false, 9000), screen(1, true, 60000)];
+  for (let n = 2; n < 12; n++) sent.push(screen(n, false, 8000 + n * 100));
+  const before = keyAsks;
+  for (const f of sent) { cb.videoFrame(f); await new Promise((r) => setTimeout(r, 30)); }
+  assert.ok(await waitFor(() => got.frames.length >= sent.length - 1, 3000), `screen frames at the relay: ${got.frames.length}`);
+  cb.screen(false);
+  assert.deepStrictEqual(sig(12064).map((f) => f.data.status), [1, 0]);
+  assert.deepStrictEqual(rejections.map(String), []);
+  assert.strictEqual(got.bad, 0);
+  assert.ok(keyAsks > before, 'a delta before the first key frame asks the window for one');
+  assert.deepStrictEqual(got.frames.map((f) => f.data), sent.slice(1).map((f) => f.data), 'every frame after the key frame, whole');
+  assert.deepStrictEqual(got.frames.map((f) => f.pt), [98, ...Array(10).fill(97)]);
+  return got.frames.map((f) => f.data.length);
+}
+
+describe('1-1 screen share', () => {
+  for (const role of ['caller', 'callee']) {
+    it(`as ${role}, zrtc-media.js and zcall-media send the same frames`, { timeout: 30000 }, async (t) => {
+      const js = await screenShareCall(t, role, (log) => new ZrtcMediaBackend({ log, sendUdp: true }));
+      if (!fs.existsSync(MEDIA_BIN)) { t.skip('zcall-media release binary not built yet'); return; }
+      const rust = await screenShareCall(t, role, (log) => new MediaSwitch({ log, sendUdp: true, bin: MEDIA_BIN }));
+      assert.deepStrictEqual(rust, js);
+    });
+  }
+});
