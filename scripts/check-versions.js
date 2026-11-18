@@ -1,6 +1,7 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const https = require('https');
 const logger = require('./utils/logger');
 const { buildCommit } = require('./utils/build-commit');
@@ -46,14 +47,44 @@ async function main() {
     logger.dim(`ZADARK_VERSION=${process.env.ZADARK_VERSION}`);
     if (process.env.BUILD) logger.dim(`BUILD=${process.env.BUILD}`);
   } catch (error) {
+    // Fail the run. Exiting 0 here ended main.js too: the workflow "succeeded"
+    // having built nothing whenever zalo.me timed out.
     logger.error('Version check failed:', error.message);
-    process.exit(0); // Don't fail the whole pipeline
+    throw error;
   }
 }
 
-async function getLatestZaloVersion() {
+const ZALO_VERSION_URL = 'https://zalo.me/download/zalo-pc?utm=90000';
+// Delays before the 2nd and 3rd attempt of a request that failed for a
+// passing reason (timeout, network error, HTTP 5xx / 429).
+const RETRY_DELAYS_MS = [3000, 10000];
+
+function transient(message) {
+  const error = new Error(message);
+  error.transient = true;
+  return error;
+}
+
+async function withRetry(what, attempt, delays = RETRY_DELAYS_MS) {
+  for (let i = 0; ; i++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!error.transient || i >= delays.length) throw error;
+      logger.warn(`${what} failed (${error.message}); retrying in ${delays[i] / 1000}s (attempt ${i + 2} of ${delays.length + 1})`);
+      await new Promise((resolve) => setTimeout(resolve, delays[i]));
+    }
+  }
+}
+
+async function getLatestZaloVersion({ url = ZALO_VERSION_URL, timeoutMs = 10000, delays = RETRY_DELAYS_MS } = {}) {
+  return withRetry('Zalo version lookup', () => fetchZaloVersion(url, timeoutMs), delays);
+}
+
+// One request: the download page redirects to the current DMG.
+function fetchZaloVersion(url, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const request = https.get('https://zalo.me/download/zalo-pc?utm=90000', {
+    const request = (url.startsWith('http:') ? http : https).get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       }
@@ -76,13 +107,15 @@ async function getLatestZaloVersion() {
         }
         return;
       }
-      reject(new Error(`Unexpected HTTP ${response.statusCode}`));
+      const status = response.statusCode;
+      const message = `Unexpected HTTP ${status}`;
+      reject(status >= 500 || status === 429 ? transient(message) : new Error(message));
     });
 
-    request.on('error', reject);
-    request.setTimeout(10000, () => {
+    request.on('error', (error) => reject(transient(error.message)));
+    request.setTimeout(timeoutMs, () => {
       request.destroy();
-      reject(new Error('Request timeout'));
+      reject(transient('Request timeout'));
     });
   });
 }
@@ -175,8 +208,8 @@ if (require.main === module) {
         process.exit(1);
       });
   } else {
-    main();
+    main().catch(() => process.exit(1));
   }
 }
 
-module.exports = { main, getLatestZaloVersion };
+module.exports = { main, getLatestZaloVersion, withRetry };
