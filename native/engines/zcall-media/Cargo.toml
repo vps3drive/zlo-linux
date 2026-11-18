@@ -9,11 +9,18 @@ authors = ["Việt Nam Linux Family"]
 [lib]
 path = "src/lib.rs"
 
+# The media process (ZCALL_MEDIA=rust): replaces backends/zrtc-media.js for 1-1 audio.
+[[bin]]
+name = "zcall-media"
+path = "src/main.rs"
+
 [dependencies]
 aes = "0.8"
 hmac = "0.12"
 sha1 = "0.10"
-serde_json = "1"
+# preserve_order: JSON in log lines keeps the key order JSON.stringify gives.
+serde_json = { version = "1", features = ["preserve_order"] }
+libc = "0.2"
 
 [dev-dependencies]
 # Exact float parsing: the vectors hold JS timestamps down to the last bit.

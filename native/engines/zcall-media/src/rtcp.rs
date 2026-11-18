@@ -552,6 +552,11 @@ impl RxStats {
         self.transit = Some(transit);
     }
 
+    /// (expected, received) so far, for a loss share between two reads.
+    pub fn counts(&self) -> Option<(i64, i64)> {
+        self.started.then(|| (self.cycles + self.max_seq as i64 - self.base_seq + 1, self.received))
+    }
+
     pub fn on_sr(&mut self, buf: &[u8], now_ms: f64) {
         if buf.len() < 28 {
             return;

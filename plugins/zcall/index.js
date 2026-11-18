@@ -153,7 +153,8 @@ function start({ userDataDir }) {
  callWindow.start();
  Object.assign(process.env, {
   ZCALL_ENGINE_JS: enginePath('native-engine', 'zcall-native.js'),
-  ZCALL_MEDIA: 'zrtc',
+  // js (zrtc-media.js) unless ZCALL_MEDIA=rust asks for the zcall-media process.
+  ZCALL_MEDIA: process.env.ZCALL_MEDIA === 'rust' ? 'rust' : 'zrtc',
   ZCALL_SEND_UDP: '1',
   ZCALL_LOG_DIR: userDataDir // the AppImage is read-only
  });

@@ -5,11 +5,13 @@
 // backend and a call window.
 //
 //   node native-engine/zcall-native.js --token <TK> [--recv 29631] [--send 29632]
-//        [--media stub|zrtc] [--send-udp] [--no-window]
+//        [--media stub|zrtc|js|rust] [--send-udp] [--no-window]
 //
 //   --media stub   signalling only, no media (default; ZCALL_MEDIA)
-//   --media zrtc   Zalo relay media; packets leave the machine only with
-//                  --send-udp (ZCALL_SEND_UDP=1)
+//   --media zrtc   Zalo relay media (zrtc-media.js; "js" is the same); packets
+//                  leave the machine only with --send-udp (ZCALL_SEND_UDP=1)
+//   --media rust   1-1 calls on the zcall-media process (audio only for now),
+//                  group calls on zrtc-media.js
 //   --group        group calls (the default; ZCALL_GROUP=0 turns them off and
 //                  the call window says they are not supported): audio, camera
 //                  (ZCALL_GROUP_CAMERA=0 keeps it local) and screen share.
@@ -28,6 +30,7 @@ const { loadKey, encrypt, FrameParser } = require('../tools/lib/callv2-crypto');
 const { EngineCore } = require('./engine-core');
 const { StubMedia } = require('./backends/stub');
 const { ZrtcMediaBackend } = require('./backends/zrtc-media');
+const { createRustMedia } = require('./backends/zrtc-media-rust');
 const { createCallUi } = require('./ui-client');
 
 const args = process.argv.slice(2);
@@ -72,7 +75,12 @@ const emit = (frame) => {
     parts.forEach((part, i) => recv.write(`${part}#${id}#${parts.length}#${i}#$`));
   } catch (e) { log('emit failed', e.message); }
 };
-const media = mediaMode === 'stub' ? new StubMedia(log) : new ZrtcMediaBackend({ log, sendUdp });
+// ZCALL_MEDIA: stub (no media), zrtc / js (zrtc-media.js, the default from
+// plugins/zcall), rust (1-1 calls on the zcall-media process, see
+// backends/zrtc-media-rust.js).
+const media = mediaMode === 'stub' ? new StubMedia(log)
+  : mediaMode === 'rust' ? createRustMedia({ log, sendUdp })
+    : new ZrtcMediaBackend({ log, sendUdp });
 // --no-window: no call window. Tests add ZCALL_AUTO_ANSWER=1 to pick up
 // incoming calls automatically.
 const headless = { open() {}, status() {}, close() {}, onHangup() {},

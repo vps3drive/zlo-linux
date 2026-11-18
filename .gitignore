@@ -144,3 +144,4 @@ bun.lock
 graphify-out/
 # Native binaries deployed at build time
 native/engines/zcall/native-engine/zcall-audio
+native/engines/zcall/native-engine/zcall-media

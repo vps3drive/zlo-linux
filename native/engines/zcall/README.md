@@ -36,5 +36,12 @@ It needs libopus and libpulse-simple (PipeWire/PulseAudio; `pactl` for device
 names and the microphone volume), or ALSA (`arecord`, `aplay`) without a sound
 server. `zcall-audio --check` prints what is missing.
 
+`ZCALL_MEDIA=rust` (experimental) runs the media of 1-1 calls in the
+`native-engine/zcall-media` process (Rust, `native/engines/zcall-media`)
+instead of `backends/zrtc-media.js`: socket, SRTP, RTCP and zcall-audio, with
+the same log lines. Audio only so far: video is not shown or sent, and group
+calls stay on `zrtc-media.js`. Without the binary it falls back to
+`zrtc-media.js`. The default (`zrtc`) is unchanged.
+
 Log: `~/.config/ZaloData/native-engine-YYYYMMDD.log` (`ZCALL_VERBOSE=1` logs
 whole IPC frames, which contain ids — keep them private).

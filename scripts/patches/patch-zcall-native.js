@@ -134,8 +134,23 @@ function deployZcallAudio() {
  return false;
 }
 
+// The media process for ZCALL_MEDIA=rust (optional: zrtc-media.js is the default).
+function deployZcallMedia() {
+ const sourceBinary = resolvePrebuiltBinary('zcall-media', path.join(ROOT, 'target', 'release', 'zcall-media'));
+ const dest = path.join(ZCALL_DIR, 'native-engine', 'zcall-media');
+ if (!fs.existsSync(sourceBinary)) {
+  logger.dim('Pre-built zcall-media binary not found; ZCALL_MEDIA=rust will fall back to zrtc-media.js');
+  return false;
+ }
+ fs.copyFileSync(sourceBinary, dest);
+ fs.chmodSync(dest, 0o755);
+ logger.success('Deployed zcall-media (ZCALL_MEDIA=rust) to zcall native-engine/zcall-media');
+ return true;
+}
+
 async function main(mainJs = MAIN_JS) {
  deployZcallAudio();
+ deployZcallMedia();
  if (!fs.existsSync(mainJs)) {
   throw new Error('native call patch: main.js not found');
  }

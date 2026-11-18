@@ -36,6 +36,7 @@ describe('Native Build Orchestrator & Downloads', () => {
     assert.ok(names.includes('zocr'), 'Expected engine zocr to be discovered');
     assert.ok(names.includes('zcall-audio'), 'Expected engine zcall-audio to be discovered');
     assert.ok(names.includes('zportal'), 'Expected engine zportal to be discovered');
+    assert.ok(names.includes('zcall-media'), 'Expected engine zcall-media to be discovered');
   });
 
   it('points ONNX Runtime at the pinned NuGet package and the right library', () => {

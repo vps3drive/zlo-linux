@@ -560,48 +560,13 @@ class ZrtcMediaBackend extends EventEmitter {
   }
 
   _startAudio() {
-    const nativeCandidates = [
-      path.join(__dirname, '..', 'zcall-audio'),
-      path.join(__dirname, '..', '..', '..', '..', '..', 'target', 'release', 'zcall-audio'),
-      path.join(__dirname, '..', '..', '..', 'zcall-audio', 'target', 'release', 'zcall-audio'),
-    ];
-    const nativeBin = nativeCandidates.find(p => fs.existsSync(p));
-    if (!nativeBin) {
+    const cmd = audioCommand(this);
+    if (!cmd) {
       // Packaging error: the call goes on without sound, and the window says so.
-      this.log('media: zcall-audio binary not found; no call audio');
       this.emit('audioFault', 'audio');
       return;
     }
-    const args = [];
-    this.log(`media: audio engine ${nativeBin}`);
-    if (this.devices.mic) args.push('--mic', this.devices.mic);
-    if (this.devices.speaker) args.push('--speaker', this.devices.speaker);
-    if (this.group) args.push('--mix');
-    // ZCALL_AUDIO_ARGS replaces the group config (a live override). 1-1 keeps
-    // zcall-audio's own defaults: this capture's 20 kbps / FEC off is the group
-    // zrtcConfig, and 1-1 was already working at 32 kbps with FEC.
-    // The jitter buffer floor of the server's config (minAudioDelayMs, 80-100 in
-    // 1-1 calls), as macOS NetEq; zcall-audio's default (100) without it.
-    const minDelay = Number(this.params.config && this.params.config.minAudioDelayMs);
-    if (minDelay > 0) args.push('--min-delay', String(Math.trunc(minDelay)));
-    if (process.env.ZCALL_AUDIO_ARGS) args.push(...process.env.ZCALL_AUDIO_ARGS.split(' ').filter(Boolean));
-    else {
-      // 1-1 and group share Zalo's audio config (AEC, noise suppression, the
-      // jitter ceiling). PipeWire 1.4 cannot apply echo level, AECM routing
-      // or comfort noise; callAudioArgs only passes what the plugin honors.
-      const runtime = callAudioArgs(this.params.config);
-      if (runtime.length) {
-        args.push(...runtime);
-        this.log('media: audio config', runtime.join(' '));
-      }
-      if (this.group) {
-        const audioArgs = groupAudioArgs(this.params.config);
-        if (audioArgs.length) {
-          args.push(...audioArgs);
-          this.log('media: group audio', audioArgs.join(' '));
-        }
-      }
-    }
+    const { bin: nativeBin, args } = cmd;
     const audio = spawn(nativeBin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     this.audio = audio;
     // zcall-audio's own messages go to the engine log. "fault: mic" / "fault:
@@ -1515,6 +1480,54 @@ function groupAudioArgs(config) {
   return args;
 }
 
+// The zcall-audio command line for a call: the binary, then the devices and
+// the server's audio config (also used by the Rust media backend, which runs
+// zcall-audio itself). Null when the binary is missing. m: the backend
+// ({ log, devices, group, params }).
+function audioCommand(m) {
+  const nativeCandidates = [
+    path.join(__dirname, '..', 'zcall-audio'),
+    path.join(__dirname, '..', '..', '..', '..', '..', 'target', 'release', 'zcall-audio'),
+    path.join(__dirname, '..', '..', '..', 'zcall-audio', 'target', 'release', 'zcall-audio'),
+  ];
+  const nativeBin = nativeCandidates.find(p => fs.existsSync(p));
+  if (!nativeBin) {
+    m.log('media: zcall-audio binary not found; no call audio');
+    return null;
+  }
+  const args = [];
+  m.log(`media: audio engine ${nativeBin}`);
+  if (m.devices.mic) args.push('--mic', m.devices.mic);
+  if (m.devices.speaker) args.push('--speaker', m.devices.speaker);
+  if (m.group) args.push('--mix');
+  // ZCALL_AUDIO_ARGS replaces the group config (a live override). 1-1 keeps
+  // zcall-audio's own defaults: this capture's 20 kbps / FEC off is the group
+  // zrtcConfig, and 1-1 was already working at 32 kbps with FEC.
+  // The jitter buffer floor of the server's config (minAudioDelayMs, 80-100 in
+  // 1-1 calls), as macOS NetEq; zcall-audio's default (100) without it.
+  const minDelay = Number(m.params.config && m.params.config.minAudioDelayMs);
+  if (minDelay > 0) args.push('--min-delay', String(Math.trunc(minDelay)));
+  if (process.env.ZCALL_AUDIO_ARGS) args.push(...process.env.ZCALL_AUDIO_ARGS.split(' ').filter(Boolean));
+  else {
+    // 1-1 and group share Zalo's audio config (AEC, noise suppression, the
+    // jitter ceiling). PipeWire 1.4 cannot apply echo level, AECM routing
+    // or comfort noise; callAudioArgs only passes what the plugin honors.
+    const runtime = callAudioArgs(m.params.config);
+    if (runtime.length) {
+      args.push(...runtime);
+      m.log('media: audio config', runtime.join(' '));
+    }
+    if (m.group) {
+      const audioArgs = groupAudioArgs(m.params.config);
+      if (audioArgs.length) {
+        args.push(...audioArgs);
+        m.log('media: group audio', audioArgs.join(' '));
+      }
+    }
+  }
+  return { bin: nativeBin, args };
+}
+
 // The layer to ask the SFU for. macOS walks from the top and takes the first
 // size that fits the tile. The id asked is temporal 0 of that size
 // (spatial * 3): id 6, temporal 0 of the third size, on a 560 px tile came
@@ -1590,4 +1603,4 @@ function earlyAudioPhase(started, group, rx) {
   return null;
 }
 
-module.exports = { ZrtcMediaBackend, parseHostPort, groupAudioArgs, callAudioArgs, selectQualityId, rtpAudioLevel, endCallIsPeer, earlyAudioPhase };
+module.exports = { ZrtcMediaBackend, audioCommand, parseHostPort, groupAudioArgs, callAudioArgs, selectQualityId, rtpAudioLevel, endCallIsPeer, earlyAudioPhase };
