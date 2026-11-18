@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { getAvailableTargets } = require('../scripts/build-native');
-const { getOnnxRuntimeUrl, ONNXRUNTIME_VERSION } = require('../scripts/download');
+const { getOnnxRuntimeUrl, getOnnxRuntimeEntry, verifyOnnxRuntimeArchive, ONNXRUNTIME_VERSION, ONNXRUNTIME_SHA512 } = require('../scripts/download');
 const { ROOT } = require('../scripts/utils/paths');
 
 describe('Native Build Orchestrator & Downloads', () => {
@@ -38,12 +38,22 @@ describe('Native Build Orchestrator & Downloads', () => {
     assert.ok(names.includes('zportal'), 'Expected engine zportal to be discovered');
   });
 
-  it('generates correct OnnxRuntime download URL for current architecture', () => {
+  it('points ONNX Runtime at the pinned NuGet package and the right library', () => {
     assert.ok(ONNXRUNTIME_VERSION, 'ONNXRUNTIME_VERSION must be defined');
-    const url = getOnnxRuntimeUrl();
-    assert.ok(url.startsWith('https://github.com/microsoft/onnxruntime/releases/download/'));
-    assert.ok(url.includes(`v${ONNXRUNTIME_VERSION}`));
-    const arch = process.arch === 'arm64' ? 'aarch64' : 'x64';
-    assert.ok(url.includes(`onnxruntime-linux-${arch}-${ONNXRUNTIME_VERSION}.tgz`));
+    assert.strictEqual(getOnnxRuntimeUrl(),
+      `https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ONNXRUNTIME_VERSION}/microsoft.ml.onnxruntime.${ONNXRUNTIME_VERSION}.nupkg`);
+    assert.strictEqual(getOnnxRuntimeEntry('x64'), 'runtimes/linux-x64/native/libonnxruntime.so');
+    assert.strictEqual(getOnnxRuntimeEntry('arm64'), 'runtimes/linux-arm64/native/libonnxruntime.so');
+    assert.strictEqual(Buffer.from(ONNXRUNTIME_SHA512, 'base64').length, 64, 'SHA-512 pin must be 64 bytes');
+  });
+
+  it('rejects an ONNX Runtime package that is not the pinned one', () => {
+    const tmp = path.join(require('os').tmpdir(), `ort-test-${process.pid}.nupkg`);
+    fs.writeFileSync(tmp, 'not the package');
+    try {
+      assert.throws(() => verifyOnnxRuntimeArchive(tmp), /SHA-512/);
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
   });
 });

@@ -1,4 +1,5 @@
 const { execSync } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -8,10 +9,30 @@ const ZALO_DMG_PATTERN = 'https://res-download-pc.zadn.vn/mac/ZaloSetup-universa
 const ZALO_WIN_PATTERN = 'https://res-download-pc.zadn.vn/win/ZaloSetup-VERSION.exe';
 const { TEMP_DIR } = require('./utils/paths');
 const ONNXRUNTIME_VERSION = '1.30.0';
+// ONNX Runtime comes from Microsoft's NuGet package Microsoft.ML.OnnxRuntime
+// (the native C API distribution, linux-x64 and linux-arm64 in one .nupkg).
+// The GitHub release tarballs are gone: github.com/microsoft/onnxruntime and
+// its API answer 404 since November 2026. The package is pinned to the SHA-512
+// NuGet publishes for this version (catalog packageHash, base64).
+const ONNXRUNTIME_SHA512 = 'xTgo+P2WWI1BrKQb91+G8YR1s/SFH07xZuc42kdgS2I6GLGOAKnMVhFqCk7nmce6L6ajho8wAcqixYAiwfE79g==';
 
 function getOnnxRuntimeUrl() {
-  const arch = process.arch === 'arm64' ? 'aarch64' : 'x64';
-  return `https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-${arch}-${ONNXRUNTIME_VERSION}.tgz`;
+  const id = 'microsoft.ml.onnxruntime';
+  return `https://api.nuget.org/v3-flatcontainer/${id}/${ONNXRUNTIME_VERSION}/${id}.${ONNXRUNTIME_VERSION}.nupkg`;
+}
+
+// Path of the shared library inside the .nupkg (a zip) for this machine.
+function getOnnxRuntimeEntry(arch = process.arch) {
+  return `runtimes/linux-${arch === 'arm64' ? 'arm64' : 'x64'}/native/libonnxruntime.so`;
+}
+
+// Throws unless the archive is the pinned package (a truncated download, an
+// old cache or another file under the same name).
+function verifyOnnxRuntimeArchive(archivePath) {
+  const got = crypto.createHash('sha512').update(fs.readFileSync(archivePath)).digest('base64');
+  if (got !== ONNXRUNTIME_SHA512) {
+    throw new Error(`ONNX Runtime package ${path.basename(archivePath)} has SHA-512 ${got}, expected ${ONNXRUNTIME_SHA512}`);
+  }
 }
 
 async function main() {
@@ -135,20 +156,33 @@ async function downloadOnnxRuntime() {
     const fileSize = (stats.size / 1024 / 1024).toFixed(2);
     logger.info(`Found existing ONNX Runtime v${ONNXRUNTIME_VERSION} (${fileSize} MB)`);
 
-    if (!process.env.FORCE_DOWNLOAD) {
+    let valid = true;
+    try {
+      verifyOnnxRuntimeArchive(archivePath);
+    } catch (error) {
+      valid = false;
+      logger.warn(error.message + '; downloading it again');
+    }
+    if (valid && !process.env.FORCE_DOWNLOAD) {
       logger.success('Download skipped - ONNX Runtime archive already exists');
       return archivePath;
     }
 
-    logger.info('Force download enabled, removing existing file...');
+    if (valid) logger.info('Force download enabled, removing existing file...');
     fs.unlinkSync(archivePath);
   }
 
-  logger.info(`Downloading ONNX Runtime v${ONNXRUNTIME_VERSION}...`);
+  logger.info(`Downloading ONNX Runtime v${ONNXRUNTIME_VERSION} from NuGet...`);
   await downloadFile(url, archivePath);
 
   if (!fs.existsSync(archivePath)) {
     throw new Error('Download failed - ONNX Runtime archive not found after download');
+  }
+  try {
+    verifyOnnxRuntimeArchive(archivePath);
+  } catch (error) {
+    fs.unlinkSync(archivePath);
+    throw error;
   }
 
   const stats = fs.statSync(archivePath);
@@ -207,5 +241,8 @@ module.exports = {
   downloadWindows,
   downloadOnnxRuntime,
   getOnnxRuntimeUrl,
+  getOnnxRuntimeEntry,
+  verifyOnnxRuntimeArchive,
   ONNXRUNTIME_VERSION,
+  ONNXRUNTIME_SHA512,
 };

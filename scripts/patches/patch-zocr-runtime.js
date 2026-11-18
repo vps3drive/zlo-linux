@@ -8,7 +8,7 @@ const { createHash } = require('node:crypto');
 const { parseAst } = require('../utils/ast-transform');
 
 const { ROOT, APP_DIR, TEMP_DIR, ZOCR_DIR, APP_OCR_DIR, APP_NATIVE_LIBS, resolvePrebuiltBinary } = require('../utils/paths');
-const { getOnnxRuntimeUrl, ONNXRUNTIME_VERSION } = require('../download');
+const { getOnnxRuntimeUrl, getOnnxRuntimeEntry, verifyOnnxRuntimeArchive, ONNXRUNTIME_VERSION } = require('../download');
 // Extract the 32-byte seed used by the OCR model vault.
 function extractKey(data) {
   function requireBytes(offset, length) {
@@ -281,7 +281,7 @@ function installOnnxRuntime() {
   if (!fs.existsSync(libraryPath)) {
     const archive = path.join(TEMP_DIR, filename);
     if (!fs.existsSync(archive)) {
-      logger.warn('ONNX Runtime archive not found in temp, attempting on-demand download...');
+      logger.warn('ONNX Runtime package not found in temp, attempting on-demand download...');
       try {
         execFileSync('wget', ['--progress=bar:force', url, '-O', archive], { stdio: 'inherit' });
       } catch (error) {
@@ -289,17 +289,23 @@ function installOnnxRuntime() {
         throw new Error(`Failed to download ONNX Runtime: ${error.message}. Please run "npm run download" first.`);
       }
     } else {
-      logger.dim(`Using cached ONNX Runtime archive: ${filename}`);
+      logger.dim(`Using cached ONNX Runtime package: ${filename}`);
+    }
+    try {
+      verifyOnnxRuntimeArchive(archive);
+    } catch (error) {
+      fs.removeSync(archive);
+      throw new Error(`${error.message}. Removed it; run "npm run download" again.`);
     }
 
-    logger.info(`Extracting ${libraryName}...`);
-    execFileSync('tar', [
-      '-xzf', archive, '-C', TEMP_DIR, '--strip-components=2',
-      `${filename.replace(/\.tgz$/, '')}/lib/${libraryName}`,
-    ], { stdio: 'pipe' });
-    if (!fs.existsSync(libraryPath)) {
-      throw new Error(`ONNX Runtime library not found after extraction: ${libraryPath}`);
+    // The .nupkg is a zip: take the one library for this architecture out of it.
+    const entry = getOnnxRuntimeEntry();
+    logger.info(`Extracting ${entry}...`);
+    const lib = execFileSync('7z', ['e', '-so', archive, entry], { maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (!lib.length) {
+      throw new Error(`ONNX Runtime library ${entry} not found in ${filename}`);
     }
+    fs.writeFileSync(libraryPath, lib);
   } else {
     logger.dim(`Using cached ONNX Runtime library: ${libraryName}`);
   }
