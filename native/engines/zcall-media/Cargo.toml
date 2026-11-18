@@ -1,0 +1,20 @@
+[package]
+name = "zcall-media"
+version = "0.1.0"
+edition = "2021"
+description = "Media layer of the native Zalo call engine: ZRTP packets, SRTP, RTP/RTCP, send-rate (port of native-engine/*.js)"
+license = "BSD-3-Clause"
+authors = ["Việt Nam Linux Family"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aes = "0.8"
+hmac = "0.12"
+sha1 = "0.10"
+serde_json = "1"
+
+[dev-dependencies]
+# Exact float parsing: the vectors hold JS timestamps down to the last bit.
+serde_json = { version = "1", features = ["float_roundtrip"] }

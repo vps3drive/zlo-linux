@@ -13,6 +13,7 @@ members = [
     "native/engines/zocr",
     "native/engines/zcall-audio",
     "native/engines/zportal",
+    "native/engines/zcall-media",
 ]
 resolver = "2"
 
