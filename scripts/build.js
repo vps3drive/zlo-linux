@@ -104,7 +104,7 @@ function jsFiles(dir) {
 
 // electron-builder's extraFiles filter decides what zcall-native/ ships. The
 // engine dies at startup if a file it requires was filtered out, so check the
-// packaged copy: every relative require resolves, and audio-io.py's opus_play.
+// packaged copy: every relative require resolves, and the zcall-audio binary.
 function checkEnginePackaged(dir) {
   const missing = [];
   if (!fs.existsSync(dir))
@@ -119,8 +119,8 @@ function checkEnginePackaged(dir) {
       }
     }
   }
-  if (!fs.existsSync(path.join(dir, "tools", "opus_play.py")))
-    missing.push("audio-io.py imports tools/opus_play.py");
+  if (!fs.existsSync(path.join(dir, "native-engine", "zcall-audio")))
+    missing.push("native-engine/zcall-audio (the audio engine) is not built");
   if (missing.length)
     throw new Error(
       "call engine incomplete in the package: " + missing.join("; "),

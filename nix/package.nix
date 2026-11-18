@@ -46,11 +46,10 @@ appimageTools.wrapAppImage {
   inherit pname version;
   src = contents;
 
-  # Calls (zcall-native) run python3, which loads libopus and libpulse-simple
-  # through ctypes, and the PulseAudio tools (pactl, pacat, parec).
+  # Calls: zcall-audio loads libopus and libpulse-simple at runtime (dlopen)
+  # and uses pactl for device names; alsa-utils without a sound server.
   extraPkgs =
     pkgs: with pkgs; [
-      python3
       libopus
       libpulseaudio
       pulseaudio

@@ -2,7 +2,7 @@
 
 **English** | [Tiếng Việt](./README.vi.md)
 
-Native low-latency real-time audio engine for Zalo calls on Linux, replacing the multi-process Python fallback (`audio-io.py`, `parec`, `pacat`).
+Audio engine of the native Zalo call engine on Linux: microphone -> Opus -> network, network -> Opus -> speaker. It replaces the former Python `audio-io.py` (with `parec` / `pacat`).
 
 ---
 
@@ -67,44 +67,39 @@ Communication between `zrtc-media.js` and the audio engine uses a binary protoco
 
 ## 3. Implementation Mechanics
 
-`zcall-audio` is a single-binary clean-room implementation written in **Rust**:
+`zcall-audio` is a single Rust binary and the only audio engine: the Python
+`audio-io.py` it replaces has been removed. It is a module-by-module port of
+that script, checked bit-exact against it on the same inputs (jitter buffer
+decisions and output PCM, MicLeveler gain).
 
 ```
 [Node.js zrtc-media]
        │  (stdin/stdout IPC pipe)
        ▼
-[zcall-audio (Single Native Binary, ~350 KB)]
-   ├── Direct libpulse-simple (C FFI) ──> Sound Server (PulseAudio / PipeWire)
-   ├── Direct libopus (C FFI)           ──> Encoding & Decoding
-   └── In-memory JitterBuffer           ──> Packet Reordering & Opus PLC
+[zcall-audio]
+   ├── libpulse-simple (dlopen) ──> PipeWire / PulseAudio, or arecord/aplay without one
+   ├── libopus (dlopen)         ──> encode / decode, FEC, PLC
+   └── pipewire -c (private)    ──> WebRTC echo cancellation (module-echo-cancel)
 ```
 
-### Key Components:
-1. **Direct C Sound Server Binding (`audio_backend.rs`)**:
-   - Uses `pa_simple_new`, `pa_simple_read`, and `pa_simple_write` from `libpulse-simple` via C FFI.
-   - Directly streams raw audio to and from the system sound daemon (PulseAudio or PipeWire via `pipewire-pulse`), bypassing all shell tools and intermediate processes.
-   - Configures native low-latency buffer attributes (target length 640 bytes = 20ms).
-2. **Native Opus Pipeline (`opus_codec.rs`)**:
-   - Direct FFI bindings to `libopus`.
-   - Encodes mic frames at 16 kHz in VoIP mode with Forward Error Correction.
-   - Decodes peer frames into 320-sample PCM buffers.
-3. **Jitter Buffer & Packet Loss Concealment (`jitter_buffer.rs`)**:
-   - Organizes inbound UDP packets in an in-memory `BTreeMap<u32, Vec<u8>>`.
-   - Reorders out-of-order packets before feeding them to the playback stream.
-   - Automatically triggers Opus Packet Loss Concealment (PLC) when packet loss is detected, preventing audible clicks or dropouts.
-4. **RFC 6464 Loudness Estimation (`level.rs`)**:
-   - Computes RMS power on the 320-sample PCM frame, maps it to logarithmic `-dBov` (0..127), matching Zalo's peer audio level indicators.
-5. **Dual-Engine Auto-Fallback (`zrtc-media.js`)**:
-   - Automatically detects and launches `zcall-audio` if compiled.
-   - If `zcall-audio` is missing or `ZCALL_USE_PYTHON=1` is specified, seamlessly falls back to `audio-io.py` to prevent regressions.
+libopus and libpulse-simple are loaded at runtime (`dl.rs`), so the binary has
+no link-time dependency on them and `zcall-audio --check` can name what is
+missing (the plugin turns that into an install hint).
 
-### Results:
-- **Audio Latency**: Dropped from ~150ms to **<15ms**.
-- **Process Count**: Reduced from 4 processes to **1**.
-- **CPU & Context Switching**: ~80% reduction during active calls.
-- **Dependencies**: Eliminates runtime requirements for `python3` and `pulseaudio-utils`.
+| Module | What it does |
+| --- | --- |
+| `io.rs` | Microphone (libpulse-simple, parec or arecord) and speaker (libpulse-simple, pacat, aplay or `--out` file), switchable mid-call |
+| `playout.rs` | One small NetEq per source (SSRC): adaptive depth from measured jitter (`--min-delay` / `--max-delay`), PLC while waiting, FEC for lost packets, pitch-period Accelerate (WSOLA), reset on bursts; sources mixed with a limiter on the sound card's clock |
+| `processing.rs` | Private `pipewire` process running module-echo-cancel (AEC; noise suppression only with `ZCALL_NOISE_SUPPRESSION=1`), and RTKit realtime for PipeWire's audio threads |
+| `leveler.rs` | MicLeveler: slow speech-only make-up gain, held while the far end talks, remembered across calls |
+| `guard.rs` | ClipGuard: steps the PulseAudio source volume down when speech clips; the call window's volume slider |
+| `diag.rs`, `dump.rs` | `diag:` line every 10 s (`ZCALL_AUDIO_DIAG=0` off); raw PCM dump with `ZCALL_AUDIO_DUMP=1` |
+| `dsp.rs` | RMS, RFC 6464 level, pitch lag / WSOLA |
 
----
+The environment switches of `audio-io.py` keep their meaning: `ZCALL_MIC`,
+`ZCALL_SPEAKER`, `ZCALL_AUDIO_PROCESSING`, `ZCALL_NOISE_SUPPRESSION`,
+`ZCALL_MIC_GAIN`, `ZCALL_MIC_AGC`, `ZCALL_PW_RT`, `ZCALL_AUDIO_DIAG`,
+`ZCALL_AUDIO_DUMP`, `ZCALL_LOG_DIR`.
 
 ## 4. Building & Testing
 

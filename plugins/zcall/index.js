@@ -40,10 +40,10 @@ function zaloMainJs() {
  ].find((p) => fs.existsSync(p));
 }
 
-// Processes running this install's engine or its audio-io: an argument is
-// exactly one of their scripts (not just a command line mentioning them).
+// Processes running this install's engine or its zcall-audio: an argument is
+// exactly one of their files (not just a command line mentioning them).
 function engineProcesses() {
- const scripts = [enginePath('native-engine', 'zcall-native.js'), enginePath('native-engine', 'audio-io.py')];
+ const scripts = [enginePath('native-engine', 'zcall-native.js'), enginePath('native-engine', 'zcall-audio')];
  const found = [];
  for (const pid of fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d)).map(Number)) {
   try {
@@ -69,13 +69,14 @@ function kill(pid, signal) {
 
 // --- system packages -------------------------------------------------------
 
-// What the engine's audio side needs: python3, libopus, and parec / pacat
-// (pactl for the device menu) or at least arecord / aplay.
+// What the engine's audio side (zcall-audio) needs: libopus, and
+// libpulse-simple (or at least arecord / aplay). pactl, for the device menu
+// and the microphone volume, comes with the PulseAudio / PipeWire tools.
 const PACKAGES = {
- debian: { cmd: 'sudo apt install', python3: 'python3', opus: 'libopus0', audio: 'pulseaudio-utils' },
- fedora: { cmd: 'sudo dnf install', python3: 'python3', opus: 'opus', audio: 'pulseaudio-utils' },
- arch: { cmd: 'sudo pacman -S', python3: 'python', opus: 'opus', audio: 'libpulse' },
- suse: { cmd: 'sudo zypper install', python3: 'python3', opus: 'libopus0', audio: 'pulseaudio-utils' }
+ debian: { cmd: 'sudo apt install', opus: 'libopus0', audio: 'libpulse0' },
+ fedora: { cmd: 'sudo dnf install', opus: 'opus', audio: 'pulseaudio-libs' },
+ arch: { cmd: 'sudo pacman -S', opus: 'opus', audio: 'libpulse' },
+ suse: { cmd: 'sudo zypper install', opus: 'libopus0', audio: 'libpulse0' }
 };
 
 function distroFamily() {
@@ -91,7 +92,7 @@ function distroFamily() {
  return 'debian';
 }
 
-/** The install command for these needs ('python3' / 'opus' / 'audio'). */
+/** The install command for these needs ('opus' / 'audio'). */
 function installHint(needs) {
  const d = PACKAGES[distroFamily()];
  return d.cmd + ' ' + needs.map((n) => d[n]).join(' ');
@@ -99,19 +100,16 @@ function installHint(needs) {
 
 let missingCache;
 
-/** The install command for what is missing, or null. Checked once (one python3 run). */
+/** The install command for what is missing, or null. Checked once (zcall-audio --check). */
 function missingPackages() {
  if (missingCache !== undefined) return missingCache;
- const res = spawnSync('python3', ['-c', [
-  'import ctypes, ctypes.util, shutil',
-  'try: ctypes.CDLL(ctypes.util.find_library("opus") or "libopus.so.0"); need = []',
-  'except OSError: need = ["opus"]',
-  'if not (shutil.which("parec") or shutil.which("arecord")): need.append("audio")',
-  'print(" ".join(need))'
- ].join('\n')], { encoding: 'utf8', timeout: 10000 });
+ const res = spawnSync(enginePath('native-engine', 'zcall-audio'), ['--check'], { encoding: 'utf8', timeout: 10000 });
+ // No binary (or it would not run) is a packaging problem, not a package to
+ // install: let the call start, and the engine reports the missing audio.
  const needs = res.error || res.status !== 0
-  ? ['python3', 'opus', 'audio']
-  : res.stdout.trim().split(/\s+/).filter(Boolean);
+  ? []
+  : res.stdout.trim().split(/\s+/).filter((n) => n in PACKAGES.debian && n !== 'cmd');
+ if (res.error || res.status !== 0) console.warn('[zcall] zcall-audio --check failed:', (res.error && res.error.message) || res.stderr);
  missingCache = needs.length ? installHint(needs) : null;
  return missingCache;
 }
@@ -166,7 +164,7 @@ function start({ userDataDir }) {
 
 /**
  * At 'will-quit'. SIGTERM to our engine: it hangs up a call in progress (the
- * phone learns at once) and exits ~300 ms later; its audio-io follows. The
+ * phone learns at once) and exits ~300 ms later; its zcall-audio follows. The
  * next start SIGKILLs anything left.
  */
 function stop() {

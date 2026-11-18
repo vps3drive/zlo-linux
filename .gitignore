@@ -130,7 +130,7 @@ typings/
 # Temporary directories
 tmp/
 temp/ 
-# Python bytecode (py_compile, a local run of audio-io.py)
+# Python bytecode
 __pycache__/
 
 # Nix build output
@@ -142,5 +142,5 @@ profiles/
 *.heapprofile
 bun.lock
 graphify-out/
-# Extracted screenshot plugin assets
-zcall-native/native-engine/zcall-audio
+# Native binaries deployed at build time
+native/engines/zcall/native-engine/zcall-audio

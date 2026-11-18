@@ -17,7 +17,7 @@
 // groupcall.spatialLayers produced a table.
 // Every member's audio
 // comes down as type 4 with SSRC = the member's UID, under the one session
-// key; audio-io mixes them (--mix). The server tells who is in the room
+// key; zcall-audio mixes them (--mix). The server tells who is in the room
 // (cmd 50, 'roster') and who left (cmd 3, 'memberLeft' / 'peerEnd').
 //
 // Packets leave the machine only when sendUdp is true (zcall-native.js
@@ -566,24 +566,22 @@ class ZrtcMediaBackend extends EventEmitter {
       path.join(__dirname, '..', '..', '..', 'zcall-audio', 'target', 'release', 'zcall-audio'),
     ];
     const nativeBin = nativeCandidates.find(p => fs.existsSync(p));
-    let execCmd = 'python3';
-    let args = [];
-
-    if (nativeBin && process.env.ZCALL_USE_PYTHON !== '1') {
-      execCmd = nativeBin;
-      this.log(`media: using native Rust audio engine (${nativeBin})`);
-    } else {
-      args.push(path.join(__dirname, '..', 'audio-io.py'));
-      this.log('media: using python audio-io engine');
+    if (!nativeBin) {
+      // Packaging error: the call goes on without sound, and the window says so.
+      this.log('media: zcall-audio binary not found; no call audio');
+      this.emit('audioFault', 'audio');
+      return;
     }
+    const args = [];
+    this.log(`media: audio engine ${nativeBin}`);
     if (this.devices.mic) args.push('--mic', this.devices.mic);
     if (this.devices.speaker) args.push('--speaker', this.devices.speaker);
     if (this.group) args.push('--mix');
     // ZCALL_AUDIO_ARGS replaces the group config (a live override). 1-1 keeps
-    // audio-io's own defaults: this capture's 20 kbps / FEC off is the group
+    // zcall-audio's own defaults: this capture's 20 kbps / FEC off is the group
     // zrtcConfig, and 1-1 was already working at 32 kbps with FEC.
     // The jitter buffer floor of the server's config (minAudioDelayMs, 80-100 in
-    // 1-1 calls), as macOS NetEq; audio-io's default (100) without it.
+    // 1-1 calls), as macOS NetEq; zcall-audio's default (100) without it.
     const minDelay = Number(this.params.config && this.params.config.minAudioDelayMs);
     if (minDelay > 0) args.push('--min-delay', String(Math.trunc(minDelay)));
     if (process.env.ZCALL_AUDIO_ARGS) args.push(...process.env.ZCALL_AUDIO_ARGS.split(' ').filter(Boolean));
@@ -604,10 +602,10 @@ class ZrtcMediaBackend extends EventEmitter {
         }
       }
     }
-    const audio = spawn(execCmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const audio = spawn(nativeBin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     this.audio = audio;
-    // audio-io's own messages go to the engine log. "fault: mic" / "fault:
-    // speaker" (the device stopped for good) and an audio-io that dies during
+    // zcall-audio's own messages go to the engine log. "fault: mic" / "fault:
+    // speaker" (the device stopped for good) and a zcall-audio that dies during
     // the call become 'audioFault' (the call window says so); after stop()
     // this.audio is null and the teardown says nothing.
     let errBuf = '';
@@ -625,7 +623,7 @@ class ZrtcMediaBackend extends EventEmitter {
       }
     });
     audio.on('exit', (code, signal) => {
-      this.log('media: audio-io exited', code === null ? signal : code);
+      this.log('media: zcall-audio exited', code === null ? signal : code);
       if (this.audio === audio) this.emit('audioFault', 'audio');
     });
     if (this.muted) this.setMute(true);
@@ -634,7 +632,7 @@ class ZrtcMediaBackend extends EventEmitter {
     let buf = Buffer.alloc(0);
     this.audio.stdout.on('data', (d) => {
       buf = Buffer.concat([buf, d]);
-      // 'A' u16 len, Opus (older audio-io) or 'L' u8 level, u16 len, Opus.
+      // 'A' u16 len, Opus (older engines) or 'L' u8 level, u16 len, Opus.
       for (; ;) {
         if (buf.length >= 3 && buf[0] === 0x41) {
           const n = buf.readUInt16BE(1);
@@ -776,7 +774,7 @@ class ZrtcMediaBackend extends EventEmitter {
 
   // When our 20 ms audio frames really leave (the phone's jitter buffer sees
   // these gaps): one line per 10 s, the longest gap and how many were over
-  // 40 / 60 ms. audio-io encodes on the microphone's clock; a busy event loop
+  // 40 / 60 ms. zcall-audio encodes on the microphone's clock; a busy event loop
   // (video in and out) would show here.
   _noteAudioTx() {
     const w = this.aTxWin;
@@ -1502,7 +1500,7 @@ function rtpAudioLevel(rtp) {
 }
 
 // Group encoder flags from the same zrtcConfig macOS reads. Absent keys keep
-// audio-io's defaults. audioBitrate is kbps (fromJson stores it as given).
+// zcall-audio's defaults. audioBitrate is kbps (fromJson stores it as given).
 // --no-high-pass stays here too: callAudioArgs also sends it for a 1-1 call.
 function groupAudioArgs(config) {
   const c = config && typeof config === 'object' ? config : {};

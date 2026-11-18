@@ -37,7 +37,7 @@ Yêu cầu:
 - `7z` để giải nén ứng dụng macOS
 - C++ build tools cho các native addon
 - Rust toolchain (stable)
-- Để gọi điện: `python3`, libopus và các công cụ PulseAudio
+- Để gọi điện: libopus và libpulse (thêm `pactl` cho menu chọn thiết bị)
 
 ```bash
 git clone https://github.com/VN-Linux-Family/zalo-for-linux.git

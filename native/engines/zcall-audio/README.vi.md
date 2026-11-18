@@ -2,7 +2,7 @@
 
 [English](./README.md) | **Tiếng Việt**
 
-Engine âm thanh thời gian thực độ trễ thấp bằng Rust Native cho cuộc gọi Zalo trên Linux, thay thế phân hệ Python trước đây (`audio-io.py`, `parec`, `pacat`).
+Engine âm thanh của engine gọi native Zalo trên Linux: micro -> Opus -> mạng, mạng -> Opus -> loa. Thay thế bản Python `audio-io.py` (cùng `parec` / `pacat`) trước đây.
 
 ---
 
@@ -67,44 +67,39 @@ Giao tiếp giữa tiến trình điều phối `zrtc-media.js` và audio engine
 
 ## 3. Cách thức triển khai (Implementation)
 
-`zcall-audio` được viết mới hoàn toàn bằng **Rust** theo nguyên tắc clean-room, đóng gói thành 1 file nhị phân duy nhất (~350 KB):
+`zcall-audio` là một binary Rust duy nhất và là engine âm thanh duy nhất: bản
+Python `audio-io.py` trước đây đã bị xoá. Đây là bản port từng module của
+script đó, đã đối chiếu khớp từng bit với bản Python trên cùng đầu vào (quyết
+định của jitter buffer, PCM đầu ra, gain của MicLeveler).
 
 ```
 [Node.js zrtc-media]
-       │  (đường ống stdin/stdout IPC)
+       │  (stdin/stdout IPC pipe)
        ▼
-[zcall-audio (1 tiến trình Native duy nhất, ~350 KB)]
-   ├── Trực tiếp libpulse-simple (C FFI) ──> Sound Server (PulseAudio / PipeWire)
-   ├── Trực tiếp libopus (C FFI)         ──> Nén & Giải mã Opus
-   └── JitterBuffer trong bộ nhớ         ──> Sắp xếp gói lệch thứ tự & Bù mất gói (PLC)
+[zcall-audio]
+   ├── libpulse-simple (dlopen) ──> PipeWire / PulseAudio, hoặc arecord/aplay nếu không có
+   ├── libopus (dlopen)         ──> encode / decode, FEC, PLC
+   └── pipewire -c (riêng)      ──> khử tiếng vọng WebRTC (module-echo-cancel)
 ```
 
-### Các module chính:
-1. **Kết nối trực tiếp C API Sound Server (`audio_backend.rs`)**:
-   - Sử dụng các hàm `pa_simple_new`, `pa_simple_read`, và `pa_simple_write` của thư viện `libpulse-simple` qua C FFI.
-   - Đọc/ghi luồng PCM trực tiếp tới daemon âm thanh (PulseAudio hoặc PipeWire qua `pipewire-pulse`), loại bỏ hoàn toàn các tiến trình shell ngoài.
-   - Cấu hình kích thước bộ đệm thấp 640 bytes (đúng bằng 1 frame 20ms).
-2. **Xử lý Codec Opus Native (`opus_codec.rs`)**:
-   - Gọi trực tiếp `libopus` qua C FFI.
-   - Mã hóa frame mic 16 kHz ở chế độ VoIP với cơ chế phục hồi lỗi trước (Forward Error Correction).
-   - Giải mã frame từ mạng ra buffer 320 mẫu PCM.
-3. **Bộ đệm Jitter & Bù mất gói (`jitter_buffer.rs`)**:
-   - Quản lý hàng đợi gói tin trong bộ nhớ bằng `BTreeMap<u32, Vec<u8>>`.
-   - Tự động sắp xếp lại các gói tin UDP bị đến lệch thứ tự trước khi đưa vào luồng phát.
-   - Tự động kích hoạt cơ chế bù suy hao gói của Opus (Opus Packet Loss Concealment - PLC) khi phát hiện mất gói tin, ngăn ngừa tiếng lộp bộp hay ngắt quãng.
-4. **Tính mức âm lượng RFC 6464 (`level.rs`)**:
-   - Tính toán công suất RMS trên 320 mẫu PCM và ánh xạ sang thang logarit `-dBov` (0..127), đồng bộ với hiển thị sóng âm của Zalo.
-5. **Cơ chế Dual-Engine Auto-Fallback (`zrtc-media.js`)**:
-   - Tự động phát hiện và khởi chạy `zcall-audio` nếu binary đã được biên dịch.
-   - Nếu binary vắng mặt hoặc có cờ `ZCALL_USE_PYTHON=1`, hệ thống tự động lùi về `audio-io.py`, đảm bảo an toàn tuyệt đối cho các môi trường đặc thù.
+libopus và libpulse-simple được nạp lúc chạy (`dl.rs`), nên binary không phụ
+thuộc chúng lúc link và `zcall-audio --check` có thể báo thiếu gì (plugin dùng
+kết quả này để gợi ý lệnh cài đặt).
 
-### Hiệu quả đạt được:
-- **Độ trễ âm thanh**: Giảm từ ~150ms xuống còn **<15ms**.
-- **Số tiến trình OS**: Giảm từ 4 tiến trình xuống còn **1 tiến trình duy nhất**.
-- **CPU & Context Switching**: Giảm ~80% tải xử lý trong suốt cuộc gọi.
-- **Dependency**: Không còn yêu cầu người dùng phải cài đặt `python3` và `pulseaudio-utils`.
+| Module | Chức năng |
+| --- | --- |
+| `io.rs` | Micro (libpulse-simple, parec hoặc arecord) và loa (libpulse-simple, pacat, aplay hoặc file `--out`), đổi được giữa cuộc gọi |
+| `playout.rs` | Mỗi nguồn (SSRC) một NetEq nhỏ: độ sâu thích ứng theo jitter đo được (`--min-delay` / `--max-delay`), PLC khi chờ, FEC cho gói mất, Accelerate theo chu kỳ cao độ (WSOLA), reset khi dồn gói; mix các nguồn có limiter theo clock của sound card |
+| `processing.rs` | Tiến trình `pipewire` riêng chạy module-echo-cancel (AEC; khử nhiễu chỉ bật khi `ZCALL_NOISE_SUPPRESSION=1`), và xin RTKit realtime cho luồng audio của PipeWire |
+| `leveler.rs` | MicLeveler: gain bù chậm chỉ cho tiếng nói, giữ nguyên khi đầu bên kia nói, nhớ qua các cuộc gọi |
+| `guard.rs` | ClipGuard: hạ âm lượng source PulseAudio khi tiếng nói bị clip; thanh trượt âm lượng của cửa sổ gọi |
+| `diag.rs`, `dump.rs` | Dòng `diag:` mỗi 10 s (`ZCALL_AUDIO_DIAG=0` để tắt); ghi PCM thô khi `ZCALL_AUDIO_DUMP=1` |
+| `dsp.rs` | RMS, mức RFC 6464, pitch lag / WSOLA |
 
----
+Các biến môi trường của `audio-io.py` giữ nguyên ý nghĩa: `ZCALL_MIC`,
+`ZCALL_SPEAKER`, `ZCALL_AUDIO_PROCESSING`, `ZCALL_NOISE_SUPPRESSION`,
+`ZCALL_MIC_GAIN`, `ZCALL_MIC_AGC`, `ZCALL_PW_RT`, `ZCALL_AUDIO_DIAG`,
+`ZCALL_AUDIO_DUMP`, `ZCALL_LOG_DIR`.
 
 ## 4. Biên dịch & Kiểm thử
 

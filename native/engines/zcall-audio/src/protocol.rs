@@ -1,24 +1,57 @@
-//! IPC Protocol constants and framing for zcall-audio.
+//! Pipe framing between zrtc-media.js and this engine (big endian).
 //!
-//! Output to stdout (big endian):
-//!   'L' (0x4c), u8 level, u16 len, Opus frame
+//! stdout  'L' u8 level, u16 len, Opus   one encoded 20 ms microphone frame; level is
+//!                                       its loudness in -dBov, 0..127 (RFC 6464, 127 =
+//!                                       silence), for the group audio-level extension
+//! stdin   'F' u32 idx, u32 src, u16 len, Opus
+//!                                       one received frame; idx = ROC<<16 | seq
+//!         'M' u8 on                     mute the microphone (sends silence)
+//!         'S' u8 on                     speaker off (received audio is played as silence)
+//!         'V' u8 percent                set the microphone's source volume (0..100, the
+//!                                       call window's slider); stderr says "mic volume: N%"
+//!                                       at the start and after every change
+//!         'D' u8 kind, u16 len, name    use another PulseAudio source (kind 'i') or
+//!                                       sink ('o') now; empty name: the default
 //!
-//! Input from stdin (big endian):
-//!   'F' (0x46), u32 idx, u32 ssrc, u16 len, Opus frame
-//!   'M' (0x4d), u8 on (mute mic)
-//!   'S' (0x53), u8 off (speaker off)
-//!   'V' (0x56), u8 percent (mic volume 0..100)
-//!   'D' (0x44), u8 kind ('i' for mic, 'o' for speaker), u16 len, device name
+//! Logs go to stderr as "[audio-io] ..." (the prefix zrtc-media.js matches);
+//! "fault: mic" / "fault: speaker" is a device that stopped for good.
 
 pub const SAMPLE_RATE: u32 = 16000;
-pub const CHANNELS: u32 = 1;
 pub const FRAME_SAMPLES: usize = 320; // 20 ms at 16 kHz
-pub const FRAME_BYTES: usize = FRAME_SAMPLES * 2; // 640 bytes s16le
+pub const FRAME_BYTES: usize = FRAME_SAMPLES * 2; // s16le mono
 
-pub const CMD_IN_FRAME: u8 = 0x46; // 'F'
-pub const CMD_IN_MUTE: u8 = 0x4d; // 'M'
-pub const CMD_IN_SPEAKER: u8 = 0x53; // 'S'
-pub const CMD_IN_VOLUME: u8 = 0x56; // 'V'
-pub const CMD_IN_DEVICE: u8 = 0x44; // 'D'
+pub const CMD_IN_FRAME: u8 = b'F';
+pub const CMD_IN_MUTE: u8 = b'M';
+pub const CMD_IN_SPEAKER: u8 = b'S';
+pub const CMD_IN_VOLUME: u8 = b'V';
+pub const CMD_IN_DEVICE: u8 = b'D';
 
-pub const CMD_OUT_LEVEL: u8 = 0x4c; // 'L'
+pub const CMD_OUT_LEVEL: u8 = b'L';
+
+#[macro_export]
+macro_rules! log {
+    ($($t:tt)*) => {{
+        eprintln!("[audio-io] {}", format!($($t)*));
+    }};
+}
+
+/// The microphone or the speaker stopped for good: zrtc-media.js turns this
+/// line into a notice in the call window. Without it a call with no sound
+/// server sent nothing for its whole length and said nothing.
+pub fn fault(kind: &str, why: impl std::fmt::Display) {
+    crate::log!("fault: {kind} {why}");
+}
+
+pub fn to_bytes(pcm: &[i16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pcm.len() * 2);
+    for s in pcm {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
+pub fn from_bytes(raw: &[u8], out: &mut [i16]) {
+    for (i, s) in out.iter_mut().enumerate() {
+        *s = i16::from_le_bytes([raw[2 * i], raw[2 * i + 1]]);
+    }
+}

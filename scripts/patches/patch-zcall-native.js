@@ -130,7 +130,7 @@ function deployZcallAudio() {
   logger.success('Deployed native zcall-audio engine to zcall native-engine/zcall-audio');
   return true;
  }
- logger.dim('Pre-built zcall-audio binary not found; audio engine will fall back to python3 audio-io.py');
+ logger.warn('Pre-built zcall-audio binary not found: calls will have no audio (run npm run build:native)');
  return false;
 }
 

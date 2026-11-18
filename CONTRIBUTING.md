@@ -37,7 +37,7 @@ Requirements:
 - `7z` for extracting the macOS app
 - C++ build tools for the native addons
 - Rust toolchain (stable)
-- For calls: `python3`, libopus and the PulseAudio tools
+- For calls: libopus and libpulse (plus `pactl` for the device menu)
 
 ```bash
 git clone https://github.com/VN-Linux-Family/zalo-for-linux.git

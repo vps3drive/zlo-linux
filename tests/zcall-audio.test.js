@@ -1,19 +1,29 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 
-test('Native zcall-audio engine full IPC protocol and state transitions', async (t) => {
+test('Native zcall-audio engine full IPC protocol and state transitions', { timeout: 20000 }, async (t) => {
   const binaryPath = path.join(__dirname, '..', 'target', 'release', 'zcall-audio');
   if (!fs.existsSync(binaryPath)) {
     t.skip('zcall-audio release binary not built yet');
     return;
   }
 
+  // Without libopus the engine cannot encode: nothing to test here.
+  const check = spawnSync(binaryPath, ['--check'], { encoding: 'utf8' });
+  if (/\bopus\b/.test(check.stdout)) {
+    t.skip('libopus not installed');
+    return;
+  }
+
   const proc = spawn(binaryPath, ['--tone'], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+
+  // A failed assertion must not leave the engine running (the test would hang).
+  t.after(() => { if (proc.exitCode === null) proc.kill('SIGKILL'); });
 
   let stderrLogs = '';
   proc.stderr.on('data', (d) => {
@@ -51,14 +61,13 @@ test('Native zcall-audio engine full IPC protocol and state transitions', async 
   assert.equal(typeof initialFrame.level, 'number', 'Audio level must be a number');
   assert.ok(initialFrame.level < 100, `Tone frame level (${initialFrame.level} dBov) must reflect audible signal (<100)`);
   assert.ok(initialFrame.len > 0, 'Opus payload must not be empty');
-  // Verify that zcall-audio announced initial mic volume at startup (required for call UI slider)
-  assert.match(stderrLogs, /\[audio-io\] mic volume: \d+%/, 'Engine must announce initial mic volume at startup');
+  assert.match(stderrLogs, /\[audio-io\] audio config: /, 'Engine must log its audio config');
 
-
-  // 2. Test Volume adjustment 'V' (percent: 75)
+  // 2. Volume 'V' (percent: 75). With --tone there is no PulseAudio source to
+  // turn, and the engine says so instead of faking a level for the slider.
   proc.stdin.write(Buffer.from([0x56, 75]));
   await new Promise((r) => setTimeout(r, 50));
-  assert.ok(stderrLogs.includes('mic volume: 75%'), 'Stderr must acknowledge volume change to 75%');
+  assert.match(stderrLogs, /\[audio-io\] mic volume: /, 'Stderr must answer the volume request');
 
   // 3. Test Mute command 'M' (mute: 1)
   proc.stdin.write(Buffer.from([0x4d, 1]));
@@ -84,13 +93,15 @@ test('Native zcall-audio engine full IPC protocol and state transitions', async 
 
   // 6. Test Speaker off command 'S' (off: 1)
   proc.stdin.write(Buffer.from([0x53, 1]));
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(stderrLogs.includes('[audio-io] speaker off'), 'Stderr must acknowledge speaker off');
 
   // 7. Test Device switch command 'D' (mic device)
   const devName = Buffer.from('default_test_mic', 'utf8');
   const devHdr = Buffer.from([0x44, 0x69, devName.length >> 8, devName.length & 0xff]);
   proc.stdin.write(Buffer.concat([devHdr, devName]));
   await new Promise((r) => setTimeout(r, 50));
-  assert.ok(stderrLogs.includes('default_test_mic'), 'Stderr must acknowledge device switch');
+  assert.ok(stderrLogs.includes('device change: microphone default_test_mic'), 'Stderr must acknowledge device switch');
 
   // 8. Clean shutdown on stdin EOF
   proc.stdin.end();
@@ -100,4 +111,17 @@ test('Native zcall-audio engine full IPC protocol and state transitions', async 
   });
 
   assert.equal(exitCode, 0, 'zcall-audio process must exit cleanly with code 0 on EOF');
+  assert.match(stderrLogs, /\[audio-io\] stats \{/, 'Engine must log its playout stats at exit');
+});
+
+test('zcall-audio --check names what calls still need', (t) => {
+  const binaryPath = path.join(__dirname, '..', 'target', 'release', 'zcall-audio');
+  if (!fs.existsSync(binaryPath)) {
+    t.skip('zcall-audio release binary not built yet');
+    return;
+  }
+  const res = spawnSync(binaryPath, ['--check'], { encoding: 'utf8' });
+  assert.equal(res.status, 0);
+  const needs = res.stdout.trim().split(/\s+/).filter(Boolean);
+  for (const n of needs) assert.ok(['opus', 'audio'].includes(n), `unexpected need ${n}`);
 });

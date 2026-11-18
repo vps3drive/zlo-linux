@@ -31,8 +31,10 @@ The patched main process (scripts/patches/patch-zcall-native.js) spawns
 and a fresh token; plugins/zcall sets the environment (`ZCALL_ENGINE_JS`,
 `ZCALL_LOG_DIR`, ...) and checks the system packages.
 
-Needs `python3` and libopus, plus PipeWire/PulseAudio (`parec`, `pacat`,
-`pactl`) or ALSA (`arecord`, `aplay`).
+Audio runs in `native-engine/zcall-audio` (Rust, `native/engines/zcall-audio`).
+It needs libopus and libpulse-simple (PipeWire/PulseAudio; `pactl` for device
+names and the microphone volume), or ALSA (`arecord`, `aplay`) without a sound
+server. `zcall-audio --check` prints what is missing.
 
 Log: `~/.config/ZaloData/native-engine-YYYYMMDD.log` (`ZCALL_VERBOSE=1` logs
 whole IPC frames, which contain ids — keep them private).

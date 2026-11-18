@@ -1,5 +1,2 @@
-fn main() {
-    println!("cargo:rustc-link-lib=opus");
-    println!("cargo:rustc-link-lib=pulse-simple");
-    println!("cargo:rustc-link-lib=pulse");
-}
+// libopus and libpulse-simple are loaded at runtime (src/dl.rs): nothing to link.
+fn main() {}

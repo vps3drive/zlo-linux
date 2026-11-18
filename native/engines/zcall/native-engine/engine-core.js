@@ -670,7 +670,7 @@ class EngineCore {
     }
   }
 
-  // The microphone, the speaker or all of audio-io stopped during the call (no
+  // The microphone, the speaker or all of zcall-audio stopped during the call (no
   // sound server, a device gone). The call goes on (the other side may still
   // hear us, or we them), and the window says what is wrong, once per device.
   _audioFault(kind) {
