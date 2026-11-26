@@ -66,8 +66,11 @@ function findUpdate(release, buildInfo, arch = archSuffix()) {
     const order = compareVersions(version, buildInfo.version);
     if (order < 0) return null;
     if (order === 0) {
-      // Same Zalo version, different build: only newer if published after we were built.
-      const published = Date.parse(release.published_at);
+      // Same Zalo version, different build: only newer if uploaded after we
+      // were built. The release workflow reuses the tag and swaps the assets,
+      // so the release's published_at stays at the first build; the asset's
+      // own timestamp is the one that moves.
+      const published = Date.parse(asset.updated_at || asset.created_at || release.published_at);
       const built = Date.parse(buildInfo.buildDate);
       if (!(published > built)) return null;
     }

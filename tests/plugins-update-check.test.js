@@ -16,13 +16,13 @@ const BUILD = {
   releaseRepo: 'vps3drive/zlo-linux'
 };
 
-function release(assets, extra = {}) {
+function release(assets, extra = {}, assetTime = '2026-11-26T08:30:00Z') {
   return {
     html_url: 'https://github.com/vps3drive/zlo-linux/releases/tag/26.11.20',
     published_at: '2026-11-26T08:30:40Z',
     draft: false,
     prerelease: false,
-    assets: assets.map((name) => ({ name })),
+    assets: assets.map((name) => ({ name, created_at: assetTime, updated_at: assetTime })),
     ...extra
   };
 }
@@ -90,10 +90,18 @@ describe('update-check plugin', () => {
     assert.equal(updateCheck.findUpdate(release(['Zalo-26.11.20-Original-925ff72-x86_64.AppImage']), BUILD, 'aarch64'), null);
   });
 
-  it('treats a rebuild of the same Zalo version as newer only when published after this build', () => {
+  it('treats a rebuild of the same Zalo version as newer only when its asset was uploaded after this build', () => {
     const same = { ...BUILD, version: '26.11.20' };
     assert.ok(updateCheck.findUpdate(release(ASSETS_2620), same, 'x86_64'));
-    assert.equal(updateCheck.findUpdate(release(ASSETS_2620, { published_at: '2026-11-01T00:00:00Z' }), same, 'x86_64'), null);
+    assert.equal(updateCheck.findUpdate(release(ASSETS_2620, {}, '2026-11-01T00:00:00Z'), same, 'x86_64'), null);
+
+    // The workflow reuses the tag: published_at stays at the first build while
+    // the assets are replaced by a later one.
+    const built0900 = { ...same, buildDate: '2026-11-26T09:00:00Z' };
+    const reused = release(ASSETS_2620, { published_at: '2026-11-26T08:30:40Z' }, '2026-11-26T09:40:00Z');
+    assert.ok(updateCheck.findUpdate(reused, built0900, 'x86_64'));
+    const older = release(ASSETS_2620, { published_at: '2026-11-26T09:30:00Z' }, '2026-11-26T08:50:00Z');
+    assert.equal(updateCheck.findUpdate(older, built0900, 'x86_64'), null);
   });
 
   it('compares versions numerically', () => {
