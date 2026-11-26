@@ -90,10 +90,16 @@ Chế độ nhà phát triển quyết định việc có thể mở Chrome DevT
 
 ---
 
-## Thông báo bản mới
+## Thông báo và cập nhật bản mới
 
-Bản AppImage kiểm tra GitHub release của repo đã build ra nó, 30 giây sau khi mở và sau đó cứ 6 giờ một lần. Khi có bản mới cùng biến thể (Original hoặc ZaDark) và cùng kiến trúc, app hiện thông báo trên desktop (mỗi bản chỉ báo một lần) và thêm mục **Có bản mới** vào menu khay hệ thống. Cả hai đều mở trang release; app không tự tải hay thay thế gì.
+Bản AppImage kiểm tra GitHub release của repo đã build ra nó, 30 giây sau khi mở và sau đó cứ 6 giờ một lần. Khi có bản mới cùng biến thể (Original hoặc ZaDark) và cùng kiến trúc, app hiện hộp thoại ngay trên cửa sổ Zalo để hỏi (mỗi bản chỉ hỏi một lần; nếu Zalo đang ẩn dưới khay thì hiện thông báo desktop, nhấn vào sẽ mở hộp thoại). Mục **Có bản mới** trên menu khay cho phép mở lại hộp thoại sau:
+
+- **Cập nhật**: tải AppImage mới về cạnh file hiện tại (một cửa sổ nhỏ hiện tiến độ, có nút Hủy), kiểm tra SHA-256 với thông tin của release rồi thay thế file hiện tại. File cũ được giữ lại thành `<tên>.AppImage.old`, muốn quay lại chỉ cần đổi tên. Sau đó app hỏi có khởi động lại không; nếu chọn để sau, mục trên khay sẽ cho khởi động lại sau.
+- **Mở trang release**: tự tải về.
+- **Để sau**: không làm gì.
+
+Nếu tải lỗi hoặc file không khớp, AppImage hiện tại được giữ nguyên. Nếu thư mục chứa AppImage không ghi được, app sẽ mở trang release thay vì tự cập nhật.
 
 - Chỉ bản AppImage mới kiểm tra. Bản Flatpak, Nix và chạy từ source được cập nhật qua kênh riêng của chúng.
 - **Tắt**: đặt `ZALO_UPDATE_CHECK=0`.
-- Muốn cập nhật delta tại chỗ, có thể dùng AppImageUpdate hoặc Gear Lever với file `.zsync` đi kèm mỗi release.
+- Muốn cập nhật delta, có thể dùng AppImageUpdate hoặc Gear Lever với file `.zsync` đi kèm mỗi release.

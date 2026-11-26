@@ -59,7 +59,7 @@ zalo-for-linux/
 │   ├── language-core      # Shared locale bridge and renderer plugin API
 │   ├── recalled-messages  # Recalled-message UI and storage
 │   ├── tray-menu          # Localized system tray menu
-│   ├── update-check       # Notifies when a newer AppImage is released
+│   ├── update-check       # Notifies about and installs newer AppImage releases
 │   ├── userscripts        # Userscript storage, injection and editor
 │   ├── window-state       # Check the window state for avoid disappearing window
 │   ├── zadark             # Dark mode, privacy features, and additional functionality extension

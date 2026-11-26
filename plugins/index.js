@@ -165,10 +165,10 @@ function register(context = {}) {
   }
  });
 
- // 5. Notify-only update check against the release repository of this build.
+ // 5. Update check against the release repository of this build (asks before updating).
  activeUpdateCheck = safeRegister('updateCheck', () => {
   if (updateCheckPlugin && typeof updateCheckPlugin.register === 'function') {
-   return updateCheckPlugin.register({ app, appDir, onTrayMenuChanged: context.onTrayMenuChanged });
+   return updateCheckPlugin.register({ app, appDir, dialog, onTrayMenuChanged: context.onTrayMenuChanged });
   }
   return null;
  });
