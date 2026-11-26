@@ -26,15 +26,19 @@ const { spawnSync } = require('child_process');
 const logger = require('../utils/logger');
 const { parseAst, applyEdits } = require('../utils/ast-transform');
 
-const { APP_PC_DIST: PC_DIST } = require('../utils/paths');
+const { APP_PC_DIST: PC_DIST, resolveLazyLoginBundles } = require('../utils/paths');
 
 // Hash part of the filenames changes per Zalo version — glob by prefix.
 const GLOB_TARGETS = [
  path.join(PC_DIST, 'compact-app-pc.*.js'),
  path.join(PC_DIST, 'search-worker.*.js'),
  path.join(PC_DIST, 'sync-v2-sub-worker.*.js'),
- path.join(PC_DIST, 'lazy', 'default-login-main-startup-shared-worker-znotification.*.js'),
+ ...(resolveLazyLoginBundles(PC_DIST).length > 0
+  ? resolveLazyLoginBundles(PC_DIST)
+  : [path.join(PC_DIST, 'lazy', 'default-login-main-startup-shared-worker-znotification.*.js')]),
 ];
+
+const OPTIONAL_WORKERS = /^(search-worker|sync-v2-sub-worker)\./;
 
 const ORIGINAL = 'let ae=()=>{{const e=$znode.os.release();if(e){if(Number(e.split(".")[0])<17)return ae=()=>!1,!1}}return ae=()=>!0,ae()};';
 const PATCHED = 'let ae=()=>{{const e=$znode.os.release();if(e){if("linux"!==$znode.os.platform()&&Number(e.split(".")[0])<17)return ae=()=>!1,!1}}return ae=()=>!0,ae()};';
@@ -83,6 +87,16 @@ async function main() {
 
   let content = fs.readFileSync(filePath, 'utf8');
   let changed = false;
+
+  // Zalo 26.11.20 dropped the call gate from the worker bundles. Workers may
+  // skip when the gate is absent; the UI bundles must still be patched.
+  const optional = OPTIONAL_WORKERS.test(file);
+  if (optional && !content.includes('split(".")[0])<17') && !content.includes(ORIGINAL)
+    && !content.includes('"linux"!==$znode.os.platform()')) {
+   logger.dim('callgate not present, skipped: ' + file);
+   patchedCount++;
+   continue;
+  }
 
   if (content.includes('"linux"!==$znode.os.platform()') || content.includes('"linux" !== $znode.os.platform()')) {
    // already patched
