@@ -67,7 +67,27 @@ jobs:
         # ubuntu images delete downloaded .debs after install, which leaves the
         # apt archive cache below empty. Drop the hook so the cache has content.
         rm -f /etc/apt/apt.conf.d/docker-clean
-        apt-get update
+        # The amd64 container defaults to archive/security.ubuntu.com, which
+        # is slow from the Azure runners and has failed mid mirror sync. Use
+        # the Azure mirror the runner hosts themselves use (it carries
+        # jammy-security too). arm64 uses ports.ubuntu.com and stays as is.
+        if [ "$(dpkg --print-architecture)" = amd64 ]; then
+          sed -i -E 's#http://(archive|security)\.ubuntu\.com/ubuntu/?#http://azure.archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list
+        fi
+        echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries
+        # apt-get update exits 100 when a mirror serves inconsistent indexes
+        # (e.g. "Mirror sync in progress?"); that is transient, so retry.
+        for attempt in 1 2 3; do
+          if apt-get update; then
+            break
+          fi
+          if [ "$attempt" = 3 ]; then
+            echo "apt-get update failed after $attempt attempts" >&2
+            exit 1
+          fi
+          echo "apt-get update failed (attempt $attempt), retrying in 20s" >&2
+          sleep 20
+        done
         apt-get install -y --no-install-recommends git ca-certificates
 
     - name: Checkout repository
