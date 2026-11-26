@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "plugin": "update-check",
+  "messages": {
+    "update-check.title": {
+      "vi": "Đã có bản Zalo for Linux mới",
+      "en": "A new Zalo for Linux build is available"
+    },
+    "update-check.body": {
+      "vi": "Bản {version} ({commit}) đã phát hành. Nhấn để mở trang tải về.",
+      "en": "Version {version} ({commit}) has been released. Click to open the download page."
+    },
+    "update-check.trayItem": {
+      "vi": "Có bản mới: {version} ({commit})",
+      "en": "Update available: {version} ({commit})"
+    }
+  }
+}

@@ -87,3 +87,13 @@ Chế độ nhà phát triển quyết định việc có thể mở Chrome DevT
 - **Cách bật**: Mở **Cài đặt → Nâng cao... → Chế độ nhà phát triển** và bật công tắc.
 - **Mở DevTools**: Nhấn `Ctrl` + `Shift` + `I` trong cửa sổ Zalo, hoặc nhấp chuột phải vào biểu tượng khay hệ thống và chọn **Bật/tắt DevTools**.
 - **Ghi đè bằng biến môi trường**: Đặt `ZALO_DEV_MODE=1` để bật cưỡng bức Chế độ nhà phát triển mà không thay đổi cấu hình đã lưu.
+
+---
+
+## Thông báo bản mới
+
+Bản AppImage kiểm tra GitHub release của repo đã build ra nó, 30 giây sau khi mở và sau đó cứ 6 giờ một lần. Khi có bản mới cùng biến thể (Original hoặc ZaDark) và cùng kiến trúc, app hiện thông báo trên desktop (mỗi bản chỉ báo một lần) và thêm mục **Có bản mới** vào menu khay hệ thống. Cả hai đều mở trang release; app không tự tải hay thay thế gì.
+
+- Chỉ bản AppImage mới kiểm tra. Bản Flatpak, Nix và chạy từ source được cập nhật qua kênh riêng của chúng.
+- **Tắt**: đặt `ZALO_UPDATE_CHECK=0`.
+- Muốn cập nhật delta tại chỗ, có thể dùng AppImageUpdate hoặc Gear Lever với file `.zsync` đi kèm mỗi release.
